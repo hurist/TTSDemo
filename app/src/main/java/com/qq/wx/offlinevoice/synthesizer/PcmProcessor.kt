@@ -16,6 +16,7 @@ class PcmProcessor(
     
     companion object {
         private const val TAG = "PcmProcessor"
+        private const val EPSILON = 0.0001f  // Tolerance for float comparison
     }
     
     /**
@@ -29,9 +30,14 @@ class PcmProcessor(
         pitch: Float = TtsConstants.PITCH_FACTOR,
         rate: Float = TtsConstants.SONIC_RATE
     ) {
+        // Check if parameters changed using tolerance-based comparison
+        val speedChanged = kotlin.math.abs(speed - currentSpeed) > EPSILON
+        val pitchChanged = kotlin.math.abs(pitch - currentPitch) > EPSILON
+        val rateChanged = kotlin.math.abs(rate - currentRate) > EPSILON
+        
         // If parameters changed or sonic is null, reinitialize
-        if (sonic == null || speed != currentSpeed || pitch != currentPitch || rate != currentRate) {
-            // Release old instance if exists
+        if (sonic == null || speedChanged || pitchChanged || rateChanged) {
+            // Sonic doesn't have explicit cleanup, just release reference
             sonic = null
             
             // Create new instance with updated parameters
