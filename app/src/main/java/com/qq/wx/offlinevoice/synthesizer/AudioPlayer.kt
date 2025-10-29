@@ -25,9 +25,10 @@ class AudioPlayer(private val sampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE
     /**
      * Start playback of PCM audio data
      * @param pcmData Short array containing PCM samples
+     * @param volume Volume level (0.0 to 1.0)
      * @param onCompletion Callback invoked when playback completes
      */
-    fun play(pcmData: ShortArray, onCompletion: (() -> Unit)? = null) {
+    fun play(pcmData: ShortArray, volume: Float = 1.0f, onCompletion: (() -> Unit)? = null) {
         stopAndRelease()
         
         if (pcmData.isEmpty()) {
@@ -58,6 +59,10 @@ class AudioPlayer(private val sampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE
                 minBufferSize,
                 AudioTrack.MODE_STREAM
             )
+            
+            // Set volume to match the requested level (Issue 1 fix)
+            val clampedVolume = volume.coerceIn(0.0f, 1.0f)
+            audioTrack?.setStereoVolume(clampedVolume, clampedVolume)
             
             audioTrack?.play()
             
