@@ -53,12 +53,12 @@ The fix serializes all access to the native TTS engine while maintaining the per
    private fun preSynthesizeNextSentence() {
        val nextSentence = sentences[nextIndex]
        try {
-           Log.d(TAG, "开始预合成下一句: $nextSentence")
+           Log.d(TAG, "Starting pre-synthesis of next sentence: $nextSentence")
            // Synchronous synthesis with lock protection
            nextSentencePcm = synthesizeSentence(nextSentence)
-           Log.d(TAG, "下一句预合成完成")
+           Log.d(TAG, "Next sentence pre-synthesis completed")
        } catch (e: Exception) {
-           Log.w(TAG, "预合成失败: ${e.message}")
+           Log.w(TAG, "Pre-synthesis failed: ${e.message}")
            nextSentencePcm = null
        }
    }
@@ -128,10 +128,11 @@ Main Synthesis Thread:
 
 - `app/src/main/java/com/qq/wx/offlinevoice/synthesizer/TtsSynthesizer.kt`
   - Added `synthesisLock: ReentrantLock`
-  - Removed `preSynthesisThread: Thread?`
-  - Modified `preSynthesizeNextSentence()` to be synchronous
+  - Removed `preSynthesisThread: Thread?` variable
+  - Modified `preSynthesizeNextSentence()` to be synchronous (no longer spawns a thread)
   - Wrapped `synthesizeSentence()` with lock protection
-  - Removed thread interrupt logic in `stopInternal()` and `restartCurrentSentence()`
+  - Removed pre-synthesis thread interrupt calls in `stopInternal()` and `restartCurrentSentence()`
+  - Note: Main synthesis thread (`synthesisThread`) is still used for overall playback coordination
 
 ## Related Issues
 

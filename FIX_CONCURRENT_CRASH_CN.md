@@ -143,10 +143,11 @@ private fun preSynthesizeNextSentence() {
 
 - `app/src/main/java/com/qq/wx/offlinevoice/synthesizer/TtsSynthesizer.kt`
   - 添加了 `synthesisLock: ReentrantLock`
-  - 移除了 `preSynthesisThread: Thread?`
-  - 修改 `preSynthesizeNextSentence()` 为同步方式
+  - 移除了 `preSynthesisThread: Thread?` 变量
+  - 修改 `preSynthesizeNextSentence()` 为同步方式（不再创建新线程）
   - 用锁保护包装 `synthesizeSentence()`
-  - 移除了 `stopInternal()` 和 `restartCurrentSentence()` 中的线程中断逻辑
+  - 移除了 `stopInternal()` 和 `restartCurrentSentence()` 中的预合成线程中断调用
+  - 注意：主合成线程（`synthesisThread`）仍用于整体播放协调
 
 ## 相关问题
 
