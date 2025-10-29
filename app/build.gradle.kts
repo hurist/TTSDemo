@@ -46,11 +46,4 @@ dependencies {
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
-    // https://mvnrepository.com/artifact/com.google.guava/guava
-    /*implementation("com.google.guava:guava:12.0") {
-        exclude( group = "com.google.guava", module = "listenablefuture")
-    }*/
-    implementation("com.google.guava:guava:33.5.0-android")
-    implementation("be.tarsos.dsp:core:2.5")
-    implementation("be.tarsos.dsp:jvm:2.5")
 }

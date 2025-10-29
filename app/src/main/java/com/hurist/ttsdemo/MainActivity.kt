@@ -48,7 +48,7 @@ class MainActivity : AppCompatActivity() {
                 val sArrArray: ShortArray = f31a.array()*/
                // SynthesizerNative.synthesize(sArrArray, 64000, )
                 val  t = a(this@MainActivity, Speaker().apply {
-                    code = "M206"
+                    code = "fn"
                 })
                 t.c()
                 t.d(50f, 50f, "如果你愿意我可以帮你画一条完整的 TTS 流程：合成 → 处理 → 播放，标出每一步对应的方法。这样你能很清楚地看到哪里开始播放。", null)

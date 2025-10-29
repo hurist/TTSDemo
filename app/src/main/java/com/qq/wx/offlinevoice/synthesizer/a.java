@@ -8,6 +8,8 @@ import android.util.Log;
 
 import com.google.common.base.Ascii;
 import com.qq.wx.offlinevoice.synthesizer.SynthesizerNative;
+
+import java.io.ByteArrayOutputStream;
 import java.nio.ShortBuffer;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -191,7 +193,7 @@ public final class a implements h {
         f29f.reset();
     }*/
 
-    public final synchronized void d(float f3, float f8, String str, g gVar) {
+/*    public final synchronized void d(float f3, float f8, String str, g gVar) {
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -246,6 +248,111 @@ public final class a implements h {
             }
         }).start();
 
+    }*/
+
+
+    // 你实际的采样率与声道数，按你的 PCM 配置填写，比如 16000/1
+    private static final int SAMPLE_RATE = 16000;
+    private static final int NUM_CHANNELS = 1;
+
+    // 降调系数：0.8f 约等于降 4 个半音；越小音高越低
+    private static final float PITCH_FACTOR = 0.68f;
+
+    // 可复用的 Sonic 处理器（也可做成局部变量按需创建）
+    private Sonic sonicProcessor;
+
+    public final synchronized void d(final float f3, final float f8, final String str, final g gVar) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                // 原 d 方法内容
+                int iA = a(str, f3, f8);
+                if (iA != 0) return;
+
+                // 初始化 Sonic（仅创建一次）
+                if (sonicProcessor == null) {
+                    sonicProcessor = new Sonic(SAMPLE_RATE, NUM_CHANNELS);
+                    sonicProcessor.setSpeed(0.78f);          // 不改变时长
+                    sonicProcessor.setPitch(PITCH_FACTOR);   // 降调系数
+                    sonicProcessor.setRate(1.0f);           // 保持播放速率
+                    sonicProcessor.setQuality(1);           // 可选：更高质量
+                }
+
+                a.this.f32b = false;
+                int[] iArr = {0};
+                short[] sArrArray = a.this.f31a.array();
+
+                // PCM 循环播放标记
+                boolean loop = true;
+
+                while (!a.this.f32b) {
+                    int iSynthesize = f29f.synthesize(sArrArray, 64000, iArr, 1);
+                    if (iSynthesize == -1) {
+                        Log.d("SynthesizerNative", "synthesize failed");
+                        f29f.reset();
+                        return;
+                    }
+
+                    int i = iArr[0];
+                    if (i <= 0) break;
+
+                    // 将 short[] 转为小端字节
+                    int iMin = Math.min(sArrArray.length, i);
+                    int i8 = iMin << 1;
+                    byte[] inBytes = new byte[i8];
+                    int bi = 0;
+                    for (int si = 0; si < iMin; si++) {
+                        short s = sArrArray[si];
+                        inBytes[bi++] = (byte) (s & 0xFF);
+                        inBytes[bi++] = (byte) ((s >>> 8) & 0xFF);
+                    }
+
+                    // 写入 Sonic 做“降调不变速”
+                    sonicProcessor.writeBytesToStream(inBytes, inBytes.length);
+
+                    // 读取处理后的 PCM（可能分多次返回）
+                    ByteArrayOutputStream baos = new ByteArrayOutputStream(inBytes.length + 1024);
+                    byte[] outBuf = new byte[inBytes.length + 1024];
+                    int numWritten;
+                    do {
+                        numWritten = sonicProcessor.readBytesFromStream(outBuf, outBuf.length);
+                        if (numWritten > 0) {
+                            baos.write(outBuf, 0, numWritten);
+                        }
+                    } while (numWritten > 0);
+
+                    byte[] processedBytes = baos.toByteArray();
+
+                    // 将处理后的字节转回 short[]，交给你的播放缓冲
+                    short[] processedShorts = bytesLEToShorts(processedBytes);
+                    pcmData = processedShorts; // 原来是 sArrArray，这里替换为降调后的数据
+
+                    startPlaybackFromBeginning(); // 播放一次 PCM
+
+                    // 可按你的播放时长/回调改成更稳妥的“等待播放完成”
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+
+                // 结束时把内部残留冲刷出来（如有需要，可读出并播放最后一段）
+                sonicProcessor.flushStream();
+
+                f29f.reset();
+            }
+        }).start();
+    }
+
+    // 小端字节转 short[]
+    private static short[] bytesLEToShorts(byte[] data) {
+        int n = data.length / 2;
+        short[] out = new short[n];
+        for (int i = 0, j = 0; i < n; i++, j += 2) {
+            out[i] = (short) ((data[j] & 0xFF) | ((data[j + 1] & 0xFF) << 8));
+        }
+        return out;
     }
 
 
