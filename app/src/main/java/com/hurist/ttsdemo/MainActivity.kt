@@ -3,6 +3,7 @@ package com.hurist.ttsdemo
 import android.content.Context
 import android.os.Bundle
 import android.util.Log
+import android.widget.Button
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
@@ -25,7 +26,8 @@ import java.io.IOException
 class MainActivity : AppCompatActivity() {
     
     private var tts: TtsSynthesizer? = null
-    
+    private lateinit var button: Button
+
     companion object {
         private const val TAG = "MainActivity"
     }
@@ -38,6 +40,19 @@ class MainActivity : AppCompatActivity() {
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
             insets
+        }
+
+        button = findViewById(R.id.button)
+        button.setOnClickListener {
+            if (tts == null) {
+                Log.w(TAG, "TTS not initialized yet")
+            } else {
+                if (tts!!.isSpeaking()) {
+                    tts!!.pause()
+                } else {
+                    tts!!.resume()
+                }
+            }
         }
 
         lifecycleScope.launch(Dispatchers.IO) {
@@ -66,68 +81,71 @@ class MainActivity : AppCompatActivity() {
             override fun onInitialized(success: Boolean) {
                 Log.d(TAG, "TTS Initialized: $success")
             }
-            
+
             override fun onSynthesisStart() {
                 Log.d(TAG, "TTS Synthesis started")
             }
-            
+
             override fun onSentenceStart(sentenceIndex: Int, sentence: String, totalSentences: Int) {
                 Log.d(TAG, "Starting sentence $sentenceIndex/$totalSentences: $sentence")
             }
-            
+
             override fun onSentenceComplete(sentenceIndex: Int, sentence: String) {
                 Log.d(TAG, "Completed sentence $sentenceIndex: $sentence")
             }
-            
+
             override fun onStateChanged(newState: TtsPlaybackState) {
                 Log.d(TAG, "State changed to: $newState")
+                runOnUiThread {
+                    button.text = "TTS State: $newState"
+                }
             }
-            
+
             override fun onSynthesisComplete() {
                 Log.d(TAG, "All synthesis completed!")
             }
-            
+
             override fun onPaused() {
                 Log.d(TAG, "TTS paused")
             }
-            
+
             override fun onResumed() {
                 Log.d(TAG, "TTS resumed")
             }
-            
+
             override fun onError(errorMessage: String) {
                 Log.e(TAG, "TTS error: $errorMessage")
             }
         }
-        
+
         // Initialize TTS
         tts?.initialize()
-        
+
         // Example 1: Basic usage - speak multiple sentences
         val longText = """
             这是第一句话。这是第二句话！这是第三句话？
             文本转语音引擎会自动分句。每句话读完后，会自动读下一句。
             直到所有句子都读完为止。
         """.trimIndent()
-        
+
         tts?.speak(
             text = longText,
             speed = 50f,
             volume = 50f,
             callback = callback
         )
-        
+
         // Example 2: Demonstrate pause/resume functionality
-        lifecycleScope.launch {
+        /*lifecycleScope.launch {
             delay(3000) // Wait 3 seconds
             Log.d(TAG, "Attempting to pause...")
             tts?.pause()
-            
+
             delay(2000) // Pause for 2 seconds
             Log.d(TAG, "Attempting to resume...")
             tts?.resume()
-        }
-        
+        }*/
+
         // Example 3: Monitor status
         lifecycleScope.launch {
             repeat(20) {
@@ -137,7 +155,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
-    
+
     override fun onDestroy() {
         super.onDestroy()
         tts?.release()
@@ -158,7 +176,12 @@ class MainActivity : AppCompatActivity() {
         try {
             val assets = context.assets.list(assetPath) ?: return
             val destDir = File(destPath)
-            if (!destDir.exists()) destDir.mkdirs()
+            if (!destDir.exists()) {
+                destDir.mkdirs()
+            } else {
+                // Directory already exists, skip copying
+                return
+            }
 
             for (fileName in assets) {
                 val assetFilePath = if (assetPath.isEmpty()) fileName else "$assetPath/$fileName"
