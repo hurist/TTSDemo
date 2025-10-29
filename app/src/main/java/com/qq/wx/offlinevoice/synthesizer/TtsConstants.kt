@@ -12,7 +12,7 @@ object TtsConstants {
     
     // Audio Processing
     const val PITCH_FACTOR = 0.68f
-    const val SONIC_SPEED = 0.78f
+    const val SONIC_SPEED = 0.72f
     const val SONIC_RATE = 1.0f
     const val SONIC_QUALITY = 1
     
