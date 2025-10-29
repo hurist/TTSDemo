@@ -9,18 +9,24 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import com.qq.wx.offlinevoice.synthesizer.Speaker
-import com.qq.wx.offlinevoice.synthesizer.SynthesizerNative
-import com.qq.wx.offlinevoice.synthesizer.TtsVoiceManager
+import com.qq.wx.offlinevoice.synthesizer.TtsSynthesizer
 import com.qq.wx.offlinevoice.synthesizer.a
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
-import java.nio.ShortBuffer
 
-
+/**
+ * Main activity demonstrating TTS usage
+ * Shows both legacy API (class a) and new API (TtsSynthesizer)
+ */
 class MainActivity : AppCompatActivity() {
+    
+    companion object {
+        private const val TAG = "MainActivity"
+    }
+    
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -31,45 +37,65 @@ class MainActivity : AppCompatActivity() {
             insets
         }
 
-        // 将
-
-        // /storage/emulated/0/Android/data/org.nobody.multitts/files/voice/weread/common/word_data.dat
-
-
-        //Log.d("TTSDemo", "onCreate: SynthesizerNative ${NativeLib.sign("test")}")
-
         lifecycleScope.launch(Dispatchers.IO) {
+            // Copy voice data files from assets
             copyAssetsToWeReadVoiceDir(this@MainActivity)
+            
             withContext(Dispatchers.Main) {
-               /* val key = TtsVoiceManager(this@MainActivity).voiceFolderPath
-                SynthesizerNative.init(key.toByteArray())
-                SynthesizerNative.setVoiceName("F191")
-                val f31a = ShortBuffer.allocate(64000)
-                val sArrArray: ShortArray = f31a.array()*/
-               // SynthesizerNative.synthesize(sArrArray, 64000, )
-                val  t = a(this@MainActivity, Speaker().apply {
-                    code = "fn"
-                })
-                t.c()
-                t.d(50f, 50f, "如果你愿意我可以帮你画一条完整的 TTS 流程：合成 → 处理 → 播放，标出每一步对应的方法。这样你能很清楚地看到哪里开始播放。", null)
+                // Example 1: Using the new TtsSynthesizer API (recommended)
+                useTtsSynthesizerExample()
+                
+                // Example 2: Using legacy API (backward compatible)
+                // useLegacyApiExample()
             }
         }
-        //Java_com_qq_wx_offlinevoice_synthesizer_SynthesizerNative_setVoiceName
-        //NativeProxy()//.a("")
+    }
+    
+    /**
+     * Example using the new TtsSynthesizer API (recommended)
+     */
+    private fun useTtsSynthesizerExample() {
+        val speaker = Speaker().apply {
+            code = "fn"
+        }
+        
+        val synthesizer = TtsSynthesizer(this, speaker)
+        synthesizer.initialize()
+        
+        val text = "如果你愿意我可以帮你画一条完整的 TTS 流程：合成 → 处理 → 播放，标出每一步对应的方法。这样你能很清楚地看到哪里开始播放。"
+        synthesizer.synthesize(50f, 50f, text, null)
+        
+        Log.d(TAG, "TTS synthesis started with new API")
+    }
+    
+    /**
+     * Example using the legacy API (for backward compatibility)
+     */
+    @Suppress("DEPRECATION")
+    private fun useLegacyApiExample() {
+        val speaker = Speaker().apply {
+            code = "fn"
+        }
+        
+        val legacySynthesizer = a(this, speaker)
+        legacySynthesizer.c() // initialize
+        
+        val text = "这是使用旧API的示例文本。"
+        legacySynthesizer.d(50f, 50f, text, null)
+        
+        Log.d(TAG, "TTS synthesis started with legacy API")
     }
 
-
-    fun copyAssetsToWeReadVoiceDir(context: Context) {
-        // 外部 files/voice/weread 目录
+    /**
+     * Copy voice data files from assets to external storage
+     */
+    private fun copyAssetsToWeReadVoiceDir(context: Context) {
         val destDir = File(context.getExternalFilesDir(null), "voice/weread")
         copyAssetFolder(context, "", destDir.absolutePath)
     }
 
     /**
-     * 递归复制 assets 中的文件夹
-     * @param context Context
-     * @param assetPath 当前 assets 路径（空字符串表示根目录）
-     * @param destPath  目标路径（外部存储）
+     * Recursively copy asset folder to destination
      */
     private fun copyAssetFolder(context: Context, assetPath: String, destPath: String) {
         try {
@@ -83,21 +109,19 @@ class MainActivity : AppCompatActivity() {
 
                 val subFiles = context.assets.list(assetFilePath)
                 if (subFiles.isNullOrEmpty()) {
-                    // 是文件
                     copyAssetFile(context, assetFilePath, destFile.absolutePath)
                 } else {
-                    // 是文件夹
                     copyAssetFolder(context, assetFilePath, destFile.absolutePath)
                 }
             }
-            Log.d("TTSDemo", "copyAssetFolder: 复制完成 $assetPath 到 $destPath")
+            Log.d(TAG, "Asset folder copied: $assetPath -> $destPath")
         } catch (e: IOException) {
-            e.printStackTrace()
+            Log.e(TAG, "Error copying asset folder", e)
         }
     }
 
     /**
-     * 复制单个文件
+     * Copy a single asset file to destination
      */
     private fun copyAssetFile(context: Context, assetFilePath: String, destFilePath: String) {
         context.assets.open(assetFilePath).use { input ->
