@@ -340,8 +340,12 @@ class TtsSynthesizer(
         val pcmData = currentSentencePcm[startIndex]
         currentPcmChunkIndex = startIndex
         
+        // Calculate volume (0.0 to 1.0 range for AudioTrack)
+        val normalizedVolume = (currentVolume / 100.0f).coerceIn(0.0f, 1.0f)
+        
         // Play with completion callback (Requirement 1: callback-based instead of Thread.sleep)
-        audioPlayer.play(pcmData) {
+        // Issue 1 fix: Pass volume parameter to audioPlayer
+        audioPlayer.play(pcmData, normalizedVolume) {
             // Playback completed callback
             stateLock.withLock {
                 if (shouldStop || currentState != TtsPlaybackState.PLAYING) {
@@ -444,8 +448,12 @@ class TtsSynthesizer(
                 return false
             }
             
-            // Start playing all chunks using callback-based approach
+            // Issue 2 fix: Merge all PCM chunks into a single continuous buffer
+            // to avoid stuttering between chunks
             if (currentSentencePcm.isNotEmpty()) {
+                val mergedPcm = mergePcmChunks(currentSentencePcm)
+                currentSentencePcm.clear()
+                currentSentencePcm.add(mergedPcm)
                 playPcmChunksFromIndex(0)
             } else {
                 // No PCM data, move to next sentence
@@ -490,6 +498,35 @@ class TtsSynthesizer(
             
             return prepareResult
         }
+    }
+    
+    /**
+     * Merge multiple PCM chunks into a single continuous buffer
+     * This prevents stuttering between chunks (Issue 2 fix)
+     */
+    private fun mergePcmChunks(chunks: List<ShortArray>): ShortArray {
+        if (chunks.isEmpty()) {
+            return ShortArray(0)
+        }
+        
+        if (chunks.size == 1) {
+            return chunks[0]
+        }
+        
+        // Calculate total size
+        val totalSize = chunks.sumOf { it.size }
+        val merged = ShortArray(totalSize)
+        
+        // Copy all chunks into merged buffer
+        var offset = 0
+        for (chunk in chunks) {
+            chunk.copyInto(merged, offset)
+            offset += chunk.size
+        }
+        
+        // Use verbose logging to avoid log spam in production
+        Log.v(TAG, "Merged ${chunks.size} PCM chunks into single buffer of size $totalSize")
+        return merged
     }
     
     /**
