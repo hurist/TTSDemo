@@ -54,11 +54,13 @@ class TtsSynthesizer(
     
     // 预合成下一句的PCM数据以优化性能(需求2)
     private var nextSentencePcm: ShortArray? = null
-    private var preSynthesisThread: Thread? = null
     
     // 线程管理
     private var synthesisThread: Thread? = null
     private val stateLock = ReentrantLock()
+    
+    // 序列化原生引擎访问以防止并发崩溃
+    private val synthesisLock = ReentrantLock()
     
     @Volatile
     private var shouldStop = false
@@ -204,7 +206,6 @@ class TtsSynthesizer(
             
             // 清空预合成的下一句
             nextSentencePcm = null
-            preSynthesisThread?.interrupt()
             
             // 在新线程中重新合成并播放当前句
             Thread {
@@ -321,10 +322,6 @@ class TtsSynthesizer(
         Log.d(TAG, "停止播放")
         shouldStop = true
         audioPlayer.stopAndRelease()
-        
-        // 中断预合成线程
-        preSynthesisThread?.interrupt()
-        preSynthesisThread = null
         
         // 重置原生引擎
         if (voiceCode == currentVoiceCode) {
@@ -452,7 +449,8 @@ class TtsSynthesizer(
         // 保存当前句子的PCM数据
         currentSentencePcm = pcmToPlay
         
-        // 异步预合成下一句以提升性能 (需求2)
+        // 同步预合成下一句以提升性能，但避免并发访问原生引擎 (需求2)
+        // 在播放当前句子之前就合成下一句，这样播放时下一句已经准备好
         if (currentSentenceIndex + 1 < sentences.size) {
             preSynthesizeNextSentence()
         }
@@ -463,6 +461,7 @@ class TtsSynthesizer(
     
     /**
      * 预合成下一句以优化性能 (需求2 - 解决低性能手机上的停顿)
+     * 使用同步方式避免并发访问原生引擎导致的崩溃
      */
     private fun preSynthesizeNextSentence() {
         val nextIndex = currentSentenceIndex + 1
@@ -471,17 +470,15 @@ class TtsSynthesizer(
         }
         
         val nextSentence = sentences[nextIndex]
-        preSynthesisThread = Thread({
-            try {
-                Log.d(TAG, "开始预合成下一句: $nextSentence")
-                nextSentencePcm = synthesizeSentence(nextSentence)
-                Log.d(TAG, "下一句预合成完成")
-            } catch (e: Exception) {
-                Log.w(TAG, "预合成失败: ${e.message}")
-                nextSentencePcm = null
-            }
-        }, "PreSynthesisThread")
-        preSynthesisThread?.start()
+        try {
+            Log.d(TAG, "开始预合成下一句: $nextSentence")
+            // 同步合成下一句，使用synthesisLock确保串行访问
+            nextSentencePcm = synthesizeSentence(nextSentence)
+            Log.d(TAG, "下一句预合成完成")
+        } catch (e: Exception) {
+            Log.w(TAG, "预合成失败: ${e.message}")
+            nextSentencePcm = null
+        }
     }
     
     /**
@@ -530,18 +527,20 @@ class TtsSynthesizer(
      * @return 合成的PCM数据，失败时返回null
      */
     private fun synthesizeSentence(sentence: String): ShortArray? {
-        try {
-            // 准备合成
-            val prepareResult = prepareForSynthesis(sentence, currentSpeed, currentVolume)
-            if (prepareResult != 0) {
-                Log.e(TAG, "准备合成失败，错误码: $prepareResult")
-                currentCallback?.onError("准备句子失败: $sentence")
-                return null
-            }
-            
-            // Initialize PcmProcessor with current speed
-            pcmProcessor.initialize(speed = currentSpeed)
-            val pcmChunks = mutableListOf<ShortArray>()
+        // 使用锁确保对原生引擎的串行访问，防止并发崩溃
+        return synthesisLock.withLock {
+            try {
+                // 准备合成
+                val prepareResult = prepareForSynthesis(sentence, currentSpeed, currentVolume)
+                if (prepareResult != 0) {
+                    Log.e(TAG, "准备合成失败，错误码: $prepareResult")
+                    currentCallback?.onError("准备句子失败: $sentence")
+                    return null
+                }
+                
+                // Initialize PcmProcessor with current speed
+                pcmProcessor.initialize(speed = currentSpeed)
+                val pcmChunks = mutableListOf<ShortArray>()
             
             val synthResult = IntArray(1)
             val pcmArray = pcmBuffer.array()
@@ -604,12 +603,13 @@ class TtsSynthesizer(
             Log.v(TAG, "句子合成完成，PCM大小: ${mergedPcm.size}")
             return mergedPcm
             
-        } catch (e: Exception) {
-            Log.e(TAG, "合成句子时出错", e)
-            currentCallback?.onError("合成错误: ${e.message}")
-            return null
-        } finally {
-            nativeEngine?.reset()
+            } catch (e: Exception) {
+                Log.e(TAG, "合成句子时出错", e)
+                currentCallback?.onError("合成错误: ${e.message}")
+                return null
+            } finally {
+                nativeEngine?.reset()
+            }
         }
     }
     
