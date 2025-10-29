@@ -3,6 +3,15 @@ package com.qq.wx.offlinevoice.synthesizer
 /**
  * 句子分割工具类
  * 用于将长文本分割成单独的句子
+ * 
+ * 支持的分隔符：。！？.!?；;
+ * 
+ * 使用示例：
+ * ```
+ * val text = "这是第一句。这是第二句！这是第三句？"
+ * val sentences = SentenceSplitter.splitWithDelimiters(text)
+ * // 结果: ["这是第一句。", "这是第二句！", "这是第三句？"]
+ * ```
  */
 object SentenceSplitter {
     
@@ -15,7 +24,7 @@ object SentenceSplitter {
     /**
      * 根据常见分隔符将文本分割成句子
      * @param text 要分割的文本
-     * @return 句子列表（非空，已去除空白）
+     * @return 句子列表（非空，已去除空白，过滤掉长度小于MIN_SENTENCE_LENGTH的句子）
      */
     fun splitIntoSentences(text: String): List<String> {
         if (text.isBlank()) {
@@ -33,8 +42,14 @@ object SentenceSplitter {
     
     /**
      * 分割文本并保留分隔符
+     * 分隔符会附加在对应句子的末尾
+     * 
      * @param text 要分割的文本
-     * @return 带有原始分隔符的句子列表
+     * @return 带有原始分隔符的句子列表（每个句子包含其后的分隔符）
+     * 
+     * 示例：
+     * 输入: "你好。世界！"
+     * 输出: ["你好。", "世界！"]
      */
     fun splitWithDelimiters(text: String): List<String> {
         if (text.isBlank()) {
