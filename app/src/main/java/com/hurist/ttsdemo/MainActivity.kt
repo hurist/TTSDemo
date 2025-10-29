@@ -9,7 +9,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
-import com.qq.wx.offlinevoice.synthesizer.Speaker
 import com.qq.wx.offlinevoice.synthesizer.TtsCallback
 import com.qq.wx.offlinevoice.synthesizer.TtsPlaybackState
 import com.qq.wx.offlinevoice.synthesizer.TtsSynthesizer
@@ -70,11 +69,8 @@ class MainActivity : AppCompatActivity() {
      * Demonstrate the new TTS features with comprehensive callbacks
      */
     private fun demonstrateNewTtsFeatures() {
-        val speaker = Speaker().apply {
-            code = "fn"
-        }
         
-        tts = TtsSynthesizer(this, speaker)
+        tts = TtsSynthesizer(this, "pb")
         
         // Create a comprehensive callback to demonstrate all events
         val callback = object : TtsCallback {
@@ -136,11 +132,9 @@ class MainActivity : AppCompatActivity() {
 　　回首，像一幕電影給視覺短暫的休憩，由眼睛觀看心笨拙的表演。
         """.trimIndent()
 
+        tts?.setCallback(callback)
         tts?.speak(
             text = longText,
-            speed = 50f,
-            volume = 50f,
-            callback = callback
         )
 
         // Example 2: Demonstrate pause/resume functionality

@@ -1,11 +1,11 @@
 package com.qq.wx.offlinevoice.synthesizer
 
-object SynthesizerNative {
+class SynthesizerNative {
 
-    init {
+    /*init {
         System.loadLibrary("hwTTS")
         System.loadLibrary("weread-tts")
-    }
+    }*/
 
     external fun destroy()
 

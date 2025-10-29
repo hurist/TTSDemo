@@ -18,10 +18,10 @@ import kotlin.concurrent.withLock
  */
 class TtsSynthesizer(
     context: Context,
-    private val speaker: Speaker
-) : TtsEngine {
+    private val voiceName: String
+) {
     
-    private val voiceCode: String = speaker.code
+    private val voiceCode: String = voiceName
     private val voiceDataPath: String
     private val pcmBuffer: ShortBuffer = ShortBuffer.allocate(TtsConstants.PCM_BUFFER_SIZE)
     
@@ -32,8 +32,8 @@ class TtsSynthesizer(
     // Playback queue and position
     private val sentences = mutableListOf<String>()
     private var currentSentenceIndex: Int = 0
-    private var currentSpeed: Float = 50f
-    private var currentVolume: Float = 50f
+    private var currentSpeed: Float = 1f
+    private var currentVolume: Float = 1f
     private var currentCallback: TtsCallback? = null
     
     // Store current sentence PCM data for pause/resume at same position
@@ -88,11 +88,11 @@ class TtsSynthesizer(
         )
     }
     
-    override fun initialize() {
+    fun initialize() {
         stateLock.withLock {
             try {
                 if (instanceCount.incrementAndGet() == 1) {
-                    nativeEngine = SynthesizerNative
+                    nativeEngine = SynthesizerNative()
                     nativeEngine?.init(voiceDataPath.toByteArray())
                     Log.d(TAG, "Native TTS engine initialized with path: $voiceDataPath")
                 }
@@ -107,8 +107,22 @@ class TtsSynthesizer(
             }
         }
     }
+
+    fun setCallback(callback: TtsCallback?) {
+        currentCallback = callback
+    }
+
+    fun setSpeed(speed: Float) {
+        currentSpeed = speed
+        Log.d(TAG, "Speech speed set to $speed")
+    }
+
+    fun setVolume(volume: Float) {
+        currentVolume = volume
+        Log.d(TAG, "Speech volume set to $volume")
+    }
     
-    override fun speak(text: String, speed: Float, volume: Float, callback: TtsCallback?) {
+    fun speak(text: String) {
         stateLock.withLock {
             // Requirement 4: Immediately stop playback and clear previous data before playing new data
             if (currentState == TtsPlaybackState.PLAYING || currentState == TtsPlaybackState.PAUSED) {
@@ -122,7 +136,7 @@ class TtsSynthesizer(
             
             if (sentences.isEmpty()) {
                 Log.w(TAG, "No sentences to speak")
-                callback?.onError("No valid sentences in text")
+                currentCallback?.onError("No valid sentences in text")
                 return
             }
             
@@ -130,9 +144,6 @@ class TtsSynthesizer(
             
             // Initialize playback state
             currentSentenceIndex = 0
-            currentSpeed = speed
-            currentVolume = volume
-            currentCallback = callback
             currentSentencePcm.clear()
             currentPcmChunkIndex = 0
             shouldStop = false
@@ -145,7 +156,7 @@ class TtsSynthesizer(
         }
     }
     
-    override fun pause() {
+    fun pause() {
         stateLock.withLock {
             if (currentState != TtsPlaybackState.PLAYING) {
                 Log.w(TAG, "Cannot pause: not playing")
@@ -160,7 +171,7 @@ class TtsSynthesizer(
         }
     }
     
-    override fun resume() {
+    fun resume() {
         stateLock.withLock {
             if (currentState != TtsPlaybackState.PAUSED) {
                 Log.w(TAG, "Cannot resume: not paused")
@@ -181,7 +192,7 @@ class TtsSynthesizer(
         }
     }
     
-    override fun stop() {
+    fun stop() {
         stateLock.withLock {
             stopInternal()
         }
@@ -223,7 +234,7 @@ class TtsSynthesizer(
         updateState(TtsPlaybackState.IDLE)
     }
     
-    override fun getStatus(): TtsStatus {
+    fun getStatus(): TtsStatus {
         stateLock.withLock {
             val currentSentence = if (currentSentenceIndex < sentences.size) {
                 sentences[currentSentenceIndex]
@@ -240,7 +251,7 @@ class TtsSynthesizer(
         }
     }
     
-    override fun isSpeaking(): Boolean {
+    fun isSpeaking(): Boolean {
         return currentState == TtsPlaybackState.PLAYING
     }
     
@@ -341,7 +352,7 @@ class TtsSynthesizer(
         currentPcmChunkIndex = startIndex
         
         // Calculate volume (0.0 to 1.0 range for AudioTrack)
-        val normalizedVolume = (currentVolume / 100.0f).coerceIn(0.0f, 1.0f)
+        val normalizedVolume = (currentVolume).coerceIn(0.0f, 1.0f)
         
         // Play with completion callback (Requirement 1: callback-based instead of Thread.sleep)
         // Issue 1 fix: Pass volume parameter to audioPlayer
@@ -483,8 +494,8 @@ class TtsSynthesizer(
             }
             
             // Set synthesis parameters
-            nativeEngine?.setSpeed(speed / TtsConstants.SPEED_VOLUME_SCALE)
-            nativeEngine?.setVolume(volume / TtsConstants.SPEED_VOLUME_SCALE)
+            nativeEngine?.setSpeed(speed)
+            nativeEngine?.setVolume(volume)
             
             // Prepare text with retry logic
             var prepareResult = -1
@@ -540,7 +551,7 @@ class TtsSynthesizer(
         }
     }
     
-    override fun release() {
+    fun release() {
         stateLock.withLock {
             Log.d(TAG, "Releasing TTS engine")
             stopInternal()
@@ -556,15 +567,5 @@ class TtsSynthesizer(
             currentState = TtsPlaybackState.IDLE
         }
     }
-    
-    // Legacy methods for backward compatibility
-    @Deprecated("Use stop() instead", ReplaceWith("stop()"))
-    override fun cancel() {
-        stop()
-    }
-    
-    @Deprecated("Use speak() instead", ReplaceWith("speak(text, speed, volume, null)"))
-    override fun synthesize(speed: Float, volume: Float, text: String, callback: g?) {
-        speak(text, speed, volume, null)
-    }
+
 }
