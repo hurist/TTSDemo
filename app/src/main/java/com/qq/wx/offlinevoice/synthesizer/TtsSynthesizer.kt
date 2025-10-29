@@ -8,13 +8,25 @@ import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
 /**
- * Text-to-Speech synthesizer with advanced playback control.
+ * 文本转语音合成器 - 支持高级播放控制
  * 
- * Features:
- * - Automatic sentence splitting and sequential playback
- * - Pause/resume/stop controls with proper position tracking
- * - Callback-based playback completion (no Thread.sleep loops)
- * - Simplified state management
+ * 主要功能：
+ * - 自动分句和顺序播放
+ * - 暂停/恢复/停止控制，支持精确位置跟踪
+ * - 基于回调的播放完成机制（无Thread.sleep循环）
+ * - 预合成下一句以优化性能，消除低性能设备上的停顿
+ * - 支持动态修改语速和发音人
+ * - 简化的状态管理（IDLE、PLAYING、PAUSED）
+ * 
+ * 使用示例：
+ * ```
+ * val tts = TtsSynthesizer(context, "pb")
+ * tts.initialize()
+ * tts.setSpeed(1.5f)  // 设置1.5倍速
+ * tts.speak("这是要朗读的文本")
+ * tts.pause()  // 暂停
+ * tts.resume()  // 从暂停位置继续
+ * ```
  */
 class TtsSynthesizer(
     context: Context,
@@ -25,7 +37,7 @@ class TtsSynthesizer(
     private val voiceDataPath: String
     private val pcmBuffer: ShortBuffer = ShortBuffer.allocate(TtsConstants.PCM_BUFFER_SIZE)
     
-    // State management - simplified to IDLE, PLAYING, PAUSED
+    // 状态管理 - 简化为IDLE、PLAYING、PAUSED三种状态
     @Volatile
     private var currentState: TtsPlaybackState = TtsPlaybackState.IDLE
     
@@ -51,7 +63,7 @@ class TtsSynthesizer(
     @Volatile
     private var shouldStop = false
     
-    // Components
+    // 组件
     private val audioPlayer: AudioPlayer = AudioPlayer(TtsConstants.DEFAULT_SAMPLE_RATE)
     private val pcmProcessor: PcmProcessor = PcmProcessor()
     
@@ -67,12 +79,12 @@ class TtsSynthesizer(
         private var currentVoiceCode: String? = null
         
         init {
-            // Load native libraries
+            // 加载原生库
             try {
                 System.loadLibrary("hwTTS")
                 System.loadLibrary("weread-tts")
             } catch (e: UnsatisfiedLinkError) {
-                Log.e(TAG, "Failed to load native libraries", e)
+                Log.e(TAG, "加载原生库失败", e)
             }
         }
     }
@@ -92,26 +104,33 @@ class TtsSynthesizer(
         )
     }
     
+    /**
+     * 初始化TTS引擎
+     */
     fun initialize() {
         stateLock.withLock {
             try {
                 if (instanceCount.incrementAndGet() == 1) {
                     nativeEngine = SynthesizerNative()
                     nativeEngine?.init(voiceDataPath.toByteArray())
-                    Log.d(TAG, "Native TTS engine initialized with path: $voiceDataPath")
+                    Log.d(TAG, "原生TTS引擎初始化完成，路径: $voiceDataPath")
                 }
                 
                 currentState = TtsPlaybackState.IDLE
                 currentCallback?.onInitialized(true)
-                Log.d(TAG, "TTS engine initialized successfully")
+                Log.d(TAG, "TTS引擎初始化成功")
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to initialize TTS engine", e)
+                Log.e(TAG, "TTS引擎初始化失败", e)
                 currentCallback?.onInitialized(false)
-                currentCallback?.onError("Initialization failed: ${e.message}")
+                currentCallback?.onError("初始化失败: ${e.message}")
             }
         }
     }
 
+    /**
+     * 设置事件回调
+     * @param callback 回调接口实现
+     */
     fun setCallback(callback: TtsCallback?) {
         currentCallback = callback
     }
@@ -195,11 +214,19 @@ class TtsSynthesizer(
                     sentence,
                     sentences.size
                 )
-                synthesizeSentenceAndPlay(sentence)
+                val pcm = synthesizeSentence(sentence)
+                if (pcm != null) {
+                    currentSentencePcm = pcm
+                    playCurrentSentence()
+                }
             }.start()
         }
     }
     
+    /**
+     * 播放文本
+     * @param text 要播放的文本，会自动分句
+     */
     fun speak(text: String) {
         stateLock.withLock {
             // 立即停止当前播放并清除之前的数据，然后播放新数据
@@ -234,6 +261,10 @@ class TtsSynthesizer(
         }
     }
     
+    /**
+     * 暂停播放
+     * 会保存当前播放位置，恢复时从此位置继续
+     */
     fun pause() {
         stateLock.withLock {
             if (currentState != TtsPlaybackState.PLAYING) {
@@ -249,6 +280,10 @@ class TtsSynthesizer(
         }
     }
     
+    /**
+     * 恢复播放
+     * 从暂停的精确位置继续播放
+     */
     fun resume() {
         stateLock.withLock {
             if (currentState != TtsPlaybackState.PAUSED) {
@@ -265,6 +300,10 @@ class TtsSynthesizer(
         }
     }
     
+    /**
+     * 停止播放
+     * 停止当前播放，清空队列
+     */
     fun stop() {
         stateLock.withLock {
             stopInternal()
@@ -311,6 +350,10 @@ class TtsSynthesizer(
         updateState(TtsPlaybackState.IDLE)
     }
     
+    /**
+     * 获取当前播放状态
+     * @return TTS状态对象，包含当前状态、句子索引等信息
+     */
     fun getStatus(): TtsStatus {
         stateLock.withLock {
             val currentSentence = if (currentSentenceIndex < sentences.size) {
@@ -328,6 +371,10 @@ class TtsSynthesizer(
         }
     }
     
+    /**
+     * 检查是否正在播放
+     * @return 如果正在播放返回true
+     */
     fun isSpeaking(): Boolean {
         return currentState == TtsPlaybackState.PLAYING
     }
@@ -630,6 +677,10 @@ class TtsSynthesizer(
         }
     }
     
+    /**
+     * 释放TTS引擎资源
+     * 应在Activity的onDestroy中调用
+     */
     fun release() {
         stateLock.withLock {
             Log.d(TAG, "释放TTS引擎")

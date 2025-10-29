@@ -1,15 +1,15 @@
 package com.qq.wx.offlinevoice.synthesizer
 
 /**
- * Playback state of the TTS engine
+ * TTS引擎的播放状态
  */
 enum class TtsPlaybackState {
-    /** TTS engine is idle (not initialized or stopped) */
+    /** TTS引擎空闲（未初始化或已停止） */
     IDLE,
     
-    /** TTS is currently synthesizing and playing */
+    /** TTS正在合成和播放 */
     PLAYING,
     
-    /** TTS playback is paused */
+    /** TTS播放已暂停 */
     PAUSED
 }
