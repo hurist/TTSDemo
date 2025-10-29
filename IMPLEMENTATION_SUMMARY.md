@@ -95,10 +95,10 @@ fun resume() {
 
 **优化点**:
 1. **职责分离**:
-   - `SentenceSplitter`: 专门负责分句
-   - `TtsSynthesizer`: 核心控制逻辑
-   - `AudioPlayer`: 音频播放
-   - `PcmProcessor`: 音频处理
+   - `SentenceSplitter`: 专门负责文本分句，支持中英文标点识别
+   - `TtsSynthesizer`: 核心控制逻辑，管理句子队列和播放流程
+   - `AudioPlayer`: 独立音频播放，使用专门线程处理音频输出
+   - `PcmProcessor`: 音频信号处理，包括音高和速度调整
 
 2. **状态管理**:
    - 使用 `ReentrantLock` 确保线程安全
@@ -138,6 +138,8 @@ fun resume() {
 保留了旧 API 方法，但标记为 `@Deprecated`：
 - `synthesize()` -> 使用 `speak()` 替代
 - `cancel()` -> 使用 `stop()` 替代
+
+**注意**: 这些废弃的方法将在未来版本中移除，建议尽快迁移到新 API。旧方法当前仍可正常工作，但不会获得新功能支持。
 
 ## 使用示例
 
@@ -218,9 +220,10 @@ val callback = object : TtsCallback {
 
 ## 文档
 
-- **README.md**: 用户指南和快速开始
-- **API.md**: 完整 API 文档和示例
-- **ARCHITECTURE.md**: 架构设计文档
+- **README.md**: 用户指南和快速开始（已更新）
+- **API.md**: 完整 API 文档和示例（新增）
+- **ARCHITECTURE.md**: 架构设计文档（已更新）
+- **IMPLEMENTATION_SUMMARY.md**: 实现总结（新增）
 - 代码内注释: 详细的实现说明
 
 ## 总结

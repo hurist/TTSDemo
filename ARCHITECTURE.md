@@ -1,8 +1,8 @@
-# TTS 系统架构文档
+# TTS 系统架构文档（v3.0）
 
 ## 架构概览
 
-本 TTS (Text-to-Speech) 系统采用模块化设计，将文本合成、音频处理和播放功能分离，便于维护和扩展。
+本 TTS (Text-to-Speech) 系统采用模块化设计，实现了完整的句子级播放控制、状态管理和事件回调系统。
 
 ## 核心组件
 
@@ -10,34 +10,61 @@
 **文件**: `TtsSynthesizer.kt`
 
 **职责**:
-- 协调整个 TTS 流程
-- 管理原生 TTS 引擎的生命周期
-- 调度 PCM 数据的生成、处理和播放
+- 协调整个 TTS 流程和句子队列管理
+- 实现播放控制（播放、暂停、恢复、停止）
+- 管理播放状态和线程同步
+- 提供完整的事件回调
 
 **关键方法**:
 ```kotlin
-fun initialize()                                    // 初始化 TTS 引擎
-fun synthesize(speed, volume, text, callback)       // 合成并播放文本
-fun cancel()                                        // 取消当前合成
-fun release()                                       // 释放资源
+fun initialize()                                        // 初始化 TTS 引擎
+fun speak(text, speed, volume, callback)               // 播放文本（自动分句）
+fun pause()                                            // 暂停播放
+fun resume()                                           // 恢复播放
+fun stop()                                             // 停止播放
+fun getStatus(): TtsStatus                             // 获取当前状态
+fun isSpeaking(): Boolean                              // 检查是否正在播放
+fun release()                                          // 释放资源
 ```
 
 **工作流程**:
 ```
 文本输入 
   ↓
-prepareForSynthesis() -----> 设置语音、速度、音量
-  ↓                          重试机制（最多3次）
-executeSynthesis() --------> 循环调用原生引擎合成 PCM
-  ↓                          检查取消标志
-PcmProcessor.process() ----> 音高和速度调整
-  ↓                          Sonic 算法处理
-AudioPlayer.play() --------> 播放处理后的音频
+自动分句 (SentenceSplitter) -----> 识别句子边界
+  ↓                                创建句子队列
+句子队列循环
   ↓
-完成/循环
+prepareForSynthesis() -----------> 设置语音、速度、音量
+  ↓                                重试机制（最多3次）
+synthesizeSentence() ------------> 合成单个句子
+  ↓                                检查暂停/停止标志
+PcmProcessor.process() ----------> 音高和速度调整
+  ↓                                Sonic 算法处理
+AudioPlayer.play() --------------> 播放处理后的音频
+  ↓
+检查暂停状态 (checkPauseState) --> 等待恢复或继续
+  ↓
+下一句/完成
 ```
 
-### 2. AudioPlayer（音频播放器）
+### 2. SentenceSplitter（句子分割器）
+**文件**: `SentenceSplitter.kt`
+
+**职责**:
+- 自动识别句子边界（中英文标点）
+- 将长文本分割为句子列表
+- 过滤无效或过短的片段
+
+**关键方法**:
+```kotlin
+fun splitIntoSentences(text): List<String>         // 分句（去除分隔符）
+fun splitWithDelimiters(text): List<String>        // 分句（保留分隔符）
+```
+
+**支持的分隔符**: 。！？；.!?;
+
+### 3. AudioPlayer（音频播放器）
 **文件**: `AudioPlayer.kt`
 
 **职责**:
