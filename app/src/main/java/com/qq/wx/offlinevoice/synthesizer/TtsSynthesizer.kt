@@ -617,10 +617,7 @@ class TtsSynthesizer(
             }
             
             // 设置合成参数
-            // 注意：这里的speed需要转换，因为原生引擎可能使用不同的范围
-            // 假设原生引擎使用0-100的范围，我们将1.0倍速映射到50
-            val nativeSpeed = (currentSpeed * 50f).coerceIn(0f, 100f)
-            nativeEngine?.setSpeed(nativeSpeed)
+            nativeEngine?.setSpeed(speed)
             nativeEngine?.setVolume(volume)
             
             // 准备文本，带重试逻辑
