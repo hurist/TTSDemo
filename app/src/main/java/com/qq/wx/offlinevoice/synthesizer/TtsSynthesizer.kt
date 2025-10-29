@@ -4,16 +4,17 @@ import android.content.Context
 import android.util.Log
 import java.nio.ShortBuffer
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /**
- * Text-to-Speech synthesizer that handles speech synthesis and playback.
- * This class replaces the obfuscated 'a' class with a cleaner, more maintainable design.
+ * Text-to-Speech synthesizer with advanced playback control.
  * 
- * The synthesis process:
- * 1. Prepare text for synthesis using native TTS library
- * 2. Synthesize text to PCM audio data
- * 3. Process PCM data (optional pitch/speed adjustment)
- * 4. Play processed audio
+ * Features:
+ * - Automatic sentence splitting and sequential playback
+ * - Pause/resume/stop controls
+ * - Comprehensive callback system
+ * - State management
  */
 class TtsSynthesizer(
     context: Context,
@@ -24,9 +25,29 @@ class TtsSynthesizer(
     private val voiceDataPath: String
     private val pcmBuffer: ShortBuffer = ShortBuffer.allocate(TtsConstants.PCM_BUFFER_SIZE)
     
+    // State management
     @Volatile
-    private var isCancelled: Boolean = false
+    private var currentState: TtsPlaybackState = TtsPlaybackState.UNINITIALIZED
     
+    @Volatile
+    private var isPausedFlag: Boolean = false
+    
+    @Volatile
+    private var isStoppedFlag: Boolean = false
+    
+    // Playback queue
+    private val sentences = mutableListOf<String>()
+    private var currentSentenceIndex: Int = 0
+    private var currentSpeed: Float = 50f
+    private var currentVolume: Float = 50f
+    private var currentCallback: TtsCallback? = null
+    
+    // Thread management
+    private var synthesisThread: Thread? = null
+    private val stateLock = ReentrantLock()
+    private val pauseLock = Object()
+    
+    // Components
     private val audioPlayer: AudioPlayer = AudioPlayer(TtsConstants.DEFAULT_SAMPLE_RATE)
     private val pcmProcessor: PcmProcessor = PcmProcessor()
     
@@ -68,51 +89,246 @@ class TtsSynthesizer(
     }
     
     override fun initialize() {
-        synchronized(this) {
-            if (instanceCount.incrementAndGet() == 1) {
-                nativeEngine = SynthesizerNative
-                nativeEngine?.init(voiceDataPath.toByteArray())
-                Log.d(TAG, "Native TTS engine initialized with path: $voiceDataPath")
-            }
-        }
-    }
-    
-    override fun cancel() {
-        synchronized(this) {
-            isCancelled = true
-            if (voiceCode == currentVoiceCode) {
-                nativeEngine?.reset()
-            }
-            audioPlayer.stopAndRelease()
-        }
-    }
-    
-    override fun synthesize(speed: Float, volume: Float, text: String, callback: g?) {
-        Thread {
-            executeSynthesis(speed, volume, text)
-        }.start()
-    }
-    
-    /**
-     * Main synthesis execution method
-     */
-    private fun executeSynthesis(speed: Float, volume: Float, text: String) {
-        try {
-            // Prepare synthesis
-            val prepareResult = prepareForSynthesis(text, speed, volume)
-            if (prepareResult != 0) {
-                Log.e(TAG, "Failed to prepare synthesis, error code: $prepareResult")
+        stateLock.withLock {
+            if (currentState != TtsPlaybackState.UNINITIALIZED) {
+                Log.w(TAG, "Already initialized")
                 return
             }
             
-            isCancelled = false
+            try {
+                if (instanceCount.incrementAndGet() == 1) {
+                    nativeEngine = SynthesizerNative
+                    nativeEngine?.init(voiceDataPath.toByteArray())
+                    Log.d(TAG, "Native TTS engine initialized with path: $voiceDataPath")
+                }
+                
+                currentState = TtsPlaybackState.IDLE
+                currentCallback?.onInitialized(true)
+                Log.d(TAG, "TTS engine initialized successfully")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to initialize TTS engine", e)
+                currentState = TtsPlaybackState.ERROR
+                currentCallback?.onInitialized(false)
+                currentCallback?.onError("Initialization failed: ${e.message}")
+            }
+        }
+    }
+    
+    override fun speak(text: String, speed: Float, volume: Float, callback: TtsCallback?) {
+        stateLock.withLock {
+            if (currentState == TtsPlaybackState.UNINITIALIZED) {
+                Log.e(TAG, "Cannot speak: TTS engine not initialized")
+                callback?.onError("TTS engine not initialized")
+                return
+            }
+            
+            if (currentState == TtsPlaybackState.PLAYING || currentState == TtsPlaybackState.PAUSED) {
+                Log.w(TAG, "Already playing/paused, stopping current playback")
+                stop()
+            }
+            
+            // Split text into sentences
+            sentences.clear()
+            sentences.addAll(SentenceSplitter.splitWithDelimiters(text))
+            
+            if (sentences.isEmpty()) {
+                Log.w(TAG, "No sentences to speak")
+                callback?.onError("No valid sentences in text")
+                return
+            }
+            
+            Log.d(TAG, "Split text into ${sentences.size} sentences")
+            
+            currentSentenceIndex = 0
+            currentSpeed = speed
+            currentVolume = volume
+            currentCallback = callback
+            isPausedFlag = false
+            isStoppedFlag = false
+            
+            // Start synthesis thread
+            synthesisThread = Thread({
+                executeSpeech()
+            }, "TtsSynthesisThread")
+            synthesisThread?.start()
+        }
+    }
+    
+    override fun pause() {
+        stateLock.withLock {
+            if (currentState != TtsPlaybackState.PLAYING) {
+                Log.w(TAG, "Cannot pause: not playing")
+                return
+            }
+            
+            isPausedFlag = true
+            audioPlayer.stopAndRelease()
+            updateState(TtsPlaybackState.PAUSED)
+            currentCallback?.onPaused()
+            Log.d(TAG, "Playback paused")
+        }
+    }
+    
+    override fun resume() {
+        stateLock.withLock {
+            if (currentState != TtsPlaybackState.PAUSED) {
+                Log.w(TAG, "Cannot resume: not paused")
+                return
+            }
+            
+            isPausedFlag = false
+            updateState(TtsPlaybackState.PLAYING)
+            currentCallback?.onResumed()
+            Log.d(TAG, "Playback resumed")
+            
+            // Notify waiting thread
+            synchronized(pauseLock) {
+                pauseLock.notifyAll()
+            }
+        }
+    }
+    
+    override fun stop() {
+        stateLock.withLock {
+            if (currentState == TtsPlaybackState.IDLE || currentState == TtsPlaybackState.STOPPING) {
+                return
+            }
+            
+            Log.d(TAG, "Stopping playback")
+            isStoppedFlag = true
+            isPausedFlag = false
+            
+            // Wake up paused thread
+            synchronized(pauseLock) {
+                pauseLock.notifyAll()
+            }
+            
+            updateState(TtsPlaybackState.STOPPING)
+            audioPlayer.stopAndRelease()
+            
+            // Reset native engine
+            if (voiceCode == currentVoiceCode) {
+                nativeEngine?.reset()
+            }
+            
+            // Wait for synthesis thread to finish
+            synthesisThread?.let { thread ->
+                if (thread.isAlive && Thread.currentThread() != thread) {
+                    try {
+                        thread.join(2000) // Wait up to 2 seconds
+                    } catch (e: InterruptedException) {
+                        Log.w(TAG, "Interrupted while waiting for synthesis thread")
+                    }
+                }
+            }
+            synthesisThread = null
+            
+            sentences.clear()
+            currentSentenceIndex = 0
+            updateState(TtsPlaybackState.IDLE)
+        }
+    }
+    
+    override fun getStatus(): TtsStatus {
+        stateLock.withLock {
+            val currentSentence = if (currentSentenceIndex < sentences.size) {
+                sentences[currentSentenceIndex]
+            } else {
+                ""
+            }
+            
+            return TtsStatus(
+                state = currentState,
+                totalSentences = sentences.size,
+                currentSentenceIndex = currentSentenceIndex,
+                currentSentence = currentSentence
+            )
+        }
+    }
+    
+    override fun isSpeaking(): Boolean {
+        return currentState == TtsPlaybackState.PLAYING
+    }
+    
+    /**
+     * Main speech execution method - processes all sentences in queue
+     */
+    private fun executeSpeech() {
+        try {
+            updateState(TtsPlaybackState.PLAYING)
+            currentCallback?.onSynthesisStart()
+            
+            // Process each sentence
+            while (currentSentenceIndex < sentences.size && !isStoppedFlag) {
+                // Check if paused
+                checkPauseState()
+                
+                if (isStoppedFlag) break
+                
+                val sentence = sentences[currentSentenceIndex]
+                Log.d(TAG, "Speaking sentence $currentSentenceIndex: $sentence")
+                
+                // Notify sentence start
+                currentCallback?.onSentenceStart(
+                    currentSentenceIndex,
+                    sentence,
+                    sentences.size
+                )
+                
+                // Synthesize and play this sentence
+                val success = synthesizeSentence(sentence)
+                
+                if (!success || isStoppedFlag) {
+                    break
+                }
+                
+                // Notify sentence complete
+                currentCallback?.onSentenceComplete(currentSentenceIndex, sentence)
+                
+                currentSentenceIndex++
+            }
+            
+            // Check if we completed all sentences
+            if (currentSentenceIndex >= sentences.size && !isStoppedFlag) {
+                Log.d(TAG, "All sentences completed")
+                currentCallback?.onSynthesisComplete()
+            }
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during speech execution", e)
+            updateState(TtsPlaybackState.ERROR)
+            currentCallback?.onError("Speech execution error: ${e.message}")
+        } finally {
+            if (!isPausedFlag && currentState != TtsPlaybackState.PAUSED) {
+                stateLock.withLock {
+                    if (currentState != TtsPlaybackState.IDLE) {
+                        updateState(TtsPlaybackState.IDLE)
+                    }
+                }
+            }
+        }
+    }
+    
+    /**
+     * Synthesize and play a single sentence
+     */
+    private fun synthesizeSentence(sentence: String): Boolean {
+        try {
+            // Prepare synthesis
+            val prepareResult = prepareForSynthesis(sentence, currentSpeed, currentVolume)
+            if (prepareResult != 0) {
+                Log.e(TAG, "Failed to prepare synthesis, error code: $prepareResult")
+                currentCallback?.onError("Failed to prepare sentence: $sentence")
+                return false
+            }
+            
             pcmProcessor.initialize()
             
             val synthResult = IntArray(1)
             val pcmArray = pcmBuffer.array()
             
-            // Synthesis loop
-            while (!isCancelled) {
+            // Synthesis loop for this sentence
+            while (!isStoppedFlag && !isPausedFlag) {
                 val synthesisStatus = nativeEngine?.synthesize(
                     pcmArray,
                     TtsConstants.PCM_BUFFER_SIZE,
@@ -123,7 +339,7 @@ class TtsSynthesizer(
                 if (synthesisStatus == -1) {
                     Log.e(TAG, "Synthesis failed")
                     nativeEngine?.reset()
-                    return
+                    return false
                 }
                 
                 val numSamples = synthResult[0]
@@ -139,27 +355,50 @@ class TtsSynthesizer(
                 val processedPcm = pcmProcessor.process(validPcm)
                 
                 // Play processed audio
-                if (!isCancelled) {
+                if (!isStoppedFlag && !isPausedFlag) {
                     audioPlayer.play(processedPcm)
                     
-                    // Wait for playback (this is a simple approach; could be improved with callbacks)
+                    // Wait for playback
                     Thread.sleep(TtsConstants.PLAYBACK_SLEEP_MS)
                 }
+                
+                // Check pause state
+                checkPauseState()
             }
             
             // Flush remaining data
             pcmProcessor.flush()
             
+            return !isStoppedFlag
+            
         } catch (e: Exception) {
-            Log.e(TAG, "Error during synthesis", e)
+            Log.e(TAG, "Error synthesizing sentence", e)
+            currentCallback?.onError("Synthesis error: ${e.message}")
+            return false
         } finally {
             nativeEngine?.reset()
         }
     }
     
     /**
+     * Check if paused and wait until resumed
+     */
+    private fun checkPauseState() {
+        while (isPausedFlag && !isStoppedFlag) {
+            synchronized(pauseLock) {
+                try {
+                    pauseLock.wait(500)
+                } catch (e: InterruptedException) {
+                    Log.w(TAG, "Interrupted while paused")
+                    Thread.currentThread().interrupt()
+                    break
+                }
+            }
+        }
+    }
+    
+    /**
      * Prepare the native engine for synthesis
-     * @return 0 on success, error code otherwise
      */
     private fun prepareForSynthesis(text: String, speed: Float, volume: Float): Int {
         synchronized(this) {
@@ -187,15 +426,42 @@ class TtsSynthesizer(
         }
     }
     
+    /**
+     * Update state and notify callback
+     */
+    private fun updateState(newState: TtsPlaybackState) {
+        if (currentState != newState) {
+            currentState = newState
+            currentCallback?.onStateChanged(newState)
+            Log.d(TAG, "State changed to: $newState")
+        }
+    }
+    
     override fun release() {
-        synchronized(this) {
+        stateLock.withLock {
+            Log.d(TAG, "Releasing TTS engine")
+            stop()
+            
             if (instanceCount.decrementAndGet() == 0) {
                 nativeEngine?.destroy()
                 nativeEngine = null
                 currentVoiceCode = null
             }
+            
+            audioPlayer.stopAndRelease()
+            pcmProcessor.release()
+            currentState = TtsPlaybackState.UNINITIALIZED
         }
-        audioPlayer.stopAndRelease()
-        pcmProcessor.release()
+    }
+    
+    // Legacy methods for backward compatibility
+    @Deprecated("Use stop() instead", ReplaceWith("stop()"))
+    override fun cancel() {
+        stop()
+    }
+    
+    @Deprecated("Use speak() instead", ReplaceWith("speak(text, speed, volume, null)"))
+    override fun synthesize(speed: Float, volume: Float, text: String, callback: g?) {
+        speak(text, speed, volume, null)
     }
 }
