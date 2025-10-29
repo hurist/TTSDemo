@@ -3,7 +3,14 @@ package com.hurist.ttsdemo
 import android.content.Context
 import android.os.Bundle
 import android.util.Log
+import android.view.View
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
 import android.widget.Button
+import android.widget.EditText
+import android.widget.SeekBar
+import android.widget.Spinner
+import android.widget.TextView
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
@@ -13,19 +20,38 @@ import com.qq.wx.offlinevoice.synthesizer.TtsCallback
 import com.qq.wx.offlinevoice.synthesizer.TtsPlaybackState
 import com.qq.wx.offlinevoice.synthesizer.TtsSynthesizer
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 
 /**
- * Main activity demonstrating TTS usage with the new optimized API
+ * 主Activity - TTS演示应用
+ * 
+ * 功能:
+ * - 手动输入文本进行播放
+ * - 动态调整语速（0.5x - 3.0x）
+ * - 动态切换发音人
+ * - 播放控制（播放/暂停/停止）
+ * - 实时显示播放状态
  */
 class MainActivity : AppCompatActivity() {
     
     private var tts: TtsSynthesizer? = null
-    private lateinit var button: Button
+    
+    // UI组件
+    private lateinit var editTextInput: EditText
+    private lateinit var seekBarSpeed: SeekBar
+    private lateinit var spinnerVoice: Spinner
+    private lateinit var buttonPlay: Button
+    private lateinit var buttonPause: Button
+    private lateinit var buttonStop: Button
+    private lateinit var textViewStatus: TextView
+    private lateinit var textViewSpeed: TextView
+
+    // 可用的发音人列表
+    private val availableVoices = listOf("pb", "fn", "ml", "yy")
+    private var currentVoice = "pb"
 
     companion object {
         private const val TAG = "MainActivity"
@@ -41,121 +67,193 @@ class MainActivity : AppCompatActivity() {
             insets
         }
 
-        button = findViewById(R.id.button)
-        button.setOnClickListener {
-            if (tts == null) {
-                Log.w(TAG, "TTS not initialized yet")
-            } else {
-                if (tts!!.isSpeaking()) {
-                    tts!!.pause()
-                } else {
-                    tts!!.resume()
-                }
-            }
-        }
-
+        // 初始化UI组件
+        initViews()
+        
+        // 异步加载语音数据
         lifecycleScope.launch(Dispatchers.IO) {
-            // Copy voice data files from assets
+            // 从assets复制语音数据文件
             copyAssetsToWeReadVoiceDir(this@MainActivity)
             
             withContext(Dispatchers.Main) {
-                // Demonstrate the new TTS features
-                demonstrateNewTtsFeatures()
+                // 初始化TTS引擎
+                initTts()
             }
         }
     }
     
     /**
-     * Demonstrate the new TTS features with comprehensive callbacks
+     * 初始化UI组件
      */
-    private fun demonstrateNewTtsFeatures() {
+    private fun initViews() {
+        editTextInput = findViewById(R.id.editTextInput)
+        seekBarSpeed = findViewById(R.id.seekBarSpeed)
+        spinnerVoice = findViewById(R.id.spinnerVoice)
+        buttonPlay = findViewById(R.id.buttonPlay)
+        buttonPause = findViewById(R.id.buttonPause)
+        buttonStop = findViewById(R.id.buttonStop)
+        textViewStatus = findViewById(R.id.textViewStatus)
+        textViewSpeed = findViewById(R.id.textViewSpeed)
         
-        tts = TtsSynthesizer(this, "pb")
+        // 设置默认文本
+        editTextInput.setText("""一顆年輕的終於在世俗中成熟起來。厭倦的枯燥乏味的生活都成了一種習慣。慵懶地呼吸著混凝土與柏油路吐出的空氣。眼睛在高樓大廈間穿梭，尋覓心走過的路。
+
+曾經喜歡一個人流浪在農村空曠的田野上，任心追逐淡而深情的泥土味，徘徊在莊稼與野草間。偶而拽著風的白褶裙隨它在深遂的天宇中飛翔。樹淩亂而尊嚴地站著，紳士般，沒有因葉子的交雜而產生的擁擠與不堪。低雁飛鵲悠閑地在風中散步。偶而會瞥一下孤獨的流浪人。遲緩地低鳴宣布著身體地倦怠。風吹來，撩撥著內心的清純與恬靜，像小貓從桌台跳到地板上那樣輕，生怕驚覺現實而荒蕪的心。""".trimIndent())
         
-        // Create a comprehensive callback to demonstrate all events
+        // 设置语速滑动条 (0.5x到3.0x，步进0.1，默认1.0x)
+        // SeekBar范围: 0-25，映射到0.5-3.0
+        seekBarSpeed.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                val speed = 0.5f + (progress / 10f)  // 0.5 到 3.0
+                textViewSpeed.text = "语速: ${String.format("%.1f", speed)}x"
+                
+                // 动态修改语速
+                tts?.setSpeed(speed)
+            }
+            
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+        
+        // 设置发音人下拉框
+        val voiceAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, availableVoices)
+        voiceAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+        spinnerVoice.adapter = voiceAdapter
+        spinnerVoice.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                currentVoice = availableVoices[position]
+                Log.d(TAG, "选择发音人: $currentVoice")
+                
+                // 动态修改发音人
+                tts?.setVoice(currentVoice)
+            }
+            
+            override fun onNothingSelected(parent: AdapterView<*>?) {}
+        }
+        
+        // 设置按钮点击事件
+        buttonPlay.setOnClickListener {
+            val text = editTextInput.text.toString().trim()
+            if (text.isNotEmpty()) {
+                tts?.speak(text)
+            } else {
+                updateStatus("请输入要播放的文本")
+            }
+        }
+        
+        buttonPause.setOnClickListener {
+            if (tts?.isSpeaking() == true) {
+                tts?.pause()
+            } else {
+                tts?.resume()
+            }
+        }
+        
+        buttonStop.setOnClickListener {
+            tts?.stop()
+        }
+    }
+    
+    /**
+     * 初始化TTS引擎
+     */
+    private fun initTts() {
+        tts = TtsSynthesizer(this, currentVoice)
+        
+        // 设置回调以监听TTS事件
         val callback = object : TtsCallback {
             override fun onInitialized(success: Boolean) {
-                Log.d(TAG, "TTS Initialized: $success")
+                Log.d(TAG, "TTS初始化: $success")
+                if (success) {
+                    runOnUiThread {
+                        updateStatus("TTS引擎已就绪")
+                        enableControls(true)
+                    }
+                } else {
+                    runOnUiThread {
+                        updateStatus("TTS引擎初始化失败")
+                    }
+                }
             }
 
             override fun onSynthesisStart() {
-                Log.d(TAG, "TTS Synthesis started")
+                Log.d(TAG, "开始合成")
             }
 
             override fun onSentenceStart(sentenceIndex: Int, sentence: String, totalSentences: Int) {
-                Log.d(TAG, "Starting sentence $sentenceIndex/$totalSentences: $sentence")
+                Log.d(TAG, "开始播放第 $sentenceIndex 句，共 $totalSentences 句")
+                runOnUiThread {
+                    updateStatus("播放中: ${sentenceIndex + 1}/$totalSentences")
+                }
             }
 
             override fun onSentenceComplete(sentenceIndex: Int, sentence: String) {
-                Log.d(TAG, "Completed sentence $sentenceIndex: $sentence")
+                Log.d(TAG, "完成第 $sentenceIndex 句")
             }
 
             override fun onStateChanged(newState: TtsPlaybackState) {
-                Log.d(TAG, "State changed to: $newState")
+                Log.d(TAG, "状态变更: $newState")
                 runOnUiThread {
-                    button.text = "TTS State: $newState"
+                    when (newState) {
+                        TtsPlaybackState.IDLE -> {
+                            updateStatus("空闲")
+                            buttonPause.text = "暂停"
+                        }
+                        TtsPlaybackState.PLAYING -> {
+                            updateStatus("播放中")
+                            buttonPause.text = "暂停"
+                        }
+                        TtsPlaybackState.PAUSED -> {
+                            updateStatus("已暂停")
+                            buttonPause.text = "继续"
+                        }
+                    }
                 }
             }
 
             override fun onSynthesisComplete() {
-                Log.d(TAG, "All synthesis completed!")
+                Log.d(TAG, "全部播放完成")
+                runOnUiThread {
+                    updateStatus("播放完成")
+                }
             }
 
             override fun onPaused() {
-                Log.d(TAG, "TTS paused")
+                Log.d(TAG, "已暂停")
             }
 
             override fun onResumed() {
-                Log.d(TAG, "TTS resumed")
+                Log.d(TAG, "已恢复")
             }
 
             override fun onError(errorMessage: String) {
-                Log.e(TAG, "TTS error: $errorMessage")
+                Log.e(TAG, "TTS错误: $errorMessage")
+                runOnUiThread {
+                    updateStatus("错误: $errorMessage")
+                }
             }
         }
-
-        // Initialize TTS
-        tts?.initialize()
-
-        // Example 1: Basic usage - speak multiple sentences
-        val longText = """
-            一顆年輕的終於在世俗中成熟起來。厭倦的枯燥乏味的生活都成了一種習慣。慵懶地呼吸著混凝土與柏油路吐出的空氣。眼睛在高樓大廈間穿梭，尋覓心走過的路。
-
-　　曾經喜歡一個人流浪在農村空曠的田野上，任心追逐淡而深情的泥土味，徘徊在莊稼與野草間。偶而拽著風的白褶裙隨它在深遂的天宇中飛翔。樹淩亂而尊嚴地站著，紳士般，沒有因葉子的交雜而產生的擁擠與不堪。低雁飛鵲悠閑地在風中散步。偶而會瞥一下孤獨的流浪人。遲緩地低鳴宣布著身體地倦怠。風吹來，撩撥著內心的清純與恬靜，像小貓從桌台跳到地板上那樣輕，生怕驚覺現實而荒蕪的心。
-
-　　也許是一種逃避，沒有容納百川的度量。當失敗的陰影牢牢罩住整個的身心，靈魂才明白所有的才能在這樣的天地中不過是對人生的一種嘲弄。所擁有的黯去光彩，所失去的都化作絕望黑與憂鬱藍，於是失落的心再找不到沉淪的地方。記憶，剛硬而倔強地寫下靈魂的心遊曆過的名勝古跡。名勝?古跡?一種虛飾的擺設罷了。任我們誹謗，任我們修改，沒有反抗的力量。心被自然伏獲後，奴性便在現實中滋長。被人造的自然景觀吸引，一樣的風，一樣的花鳥，一樣的魚石。不一樣的是那味，是那氣息。奴性成熟以後，心就學會了適應，在忍耐中適應。記憶中的往事都成了模糊而虛偽的小說。眼前的現實才是真正的擁有。回首，不過是自己給別人虛構的一個夢罷了。記憶也只是一個可任意刪改的寫字板。誰又會知道這一板前的那些東西?
-
-　　高聲唱那首《壯志在我胸》。輕聲唱那首《最遠的你是我最近的愛》。心在憂鬱地生長，在憤怒中跳動。想起了白樺林，沒有我的腳步，我卻能聽到簌簌的風掀動樹葉聲。想起了花季雨季中開懷的歡笑，想起了彈玻璃球，捉迷藏時的天真與幼稚。那都成了往事，另一個世界運行的電視劇。被現實中瑣屑的事撩擾著，迷惘地走了很長一段路，因為分不清是幻想還是回首的往事，心才迷失。
-
-　　因為空虛，所以才喜歡幻想與回首。被網絡籠絡的心沒有了真情。空虛?多么好的借口:因為生活著，所以空虛著;因為失敗過，所以才更理性的思索;因為不相信回首，也就無所謂失敗與成功。只要生活著，就要快樂著。
-
-　　回首，像一幕電影給視覺短暫的休憩，由眼睛觀看心笨拙的表演。
-        """.trimIndent()
 
         tts?.setCallback(callback)
-        tts?.speak(
-            text = longText,
-        )
-
-        // Example 2: Demonstrate pause/resume functionality
-        /*lifecycleScope.launch {
-            delay(3000) // Wait 3 seconds
-            Log.d(TAG, "Attempting to pause...")
-            tts?.pause()
-
-            delay(2000) // Pause for 2 seconds
-            Log.d(TAG, "Attempting to resume...")
-            tts?.resume()
-        }*/
-
-        // Example 3: Monitor status
-        lifecycleScope.launch {
-            repeat(20) {
-                delay(1000)
-                val status = tts?.getStatus()
-                Log.d(TAG, "Status: ${status?.state}, Sentence: ${status?.currentSentenceIndex}/${status?.totalSentences}")
-            }
-        }
+        tts?.initialize()
+    }
+    
+    /**
+     * 更新状态显示
+     */
+    private fun updateStatus(status: String) {
+        textViewStatus.text = "状态: $status"
+    }
+    
+    /**
+     * 启用/禁用控制按钮
+     */
+    private fun enableControls(enabled: Boolean) {
+        buttonPlay.isEnabled = enabled
+        buttonPause.isEnabled = enabled
+        buttonStop.isEnabled = enabled
+        seekBarSpeed.isEnabled = enabled
+        spinnerVoice.isEnabled = enabled
     }
 
     override fun onDestroy() {
@@ -164,7 +262,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Copy voice data files from assets to external storage
+     * 从assets复制语音数据文件到外部存储
      */
     private fun copyAssetsToWeReadVoiceDir(context: Context) {
         val destDir = File(context.getExternalFilesDir(null), "voice/weread")
@@ -172,7 +270,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * Recursively copy asset folder to destination
+     * 递归复制asset文件夹到目标路径
      */
     private fun copyAssetFolder(context: Context, assetPath: String, destPath: String) {
         try {
@@ -181,7 +279,7 @@ class MainActivity : AppCompatActivity() {
             if (!destDir.exists()) {
                 destDir.mkdirs()
             } else {
-                // Directory already exists, skip copying
+                // 目录已存在，跳过复制
                 return
             }
 
@@ -196,14 +294,14 @@ class MainActivity : AppCompatActivity() {
                     copyAssetFolder(context, assetFilePath, destFile.absolutePath)
                 }
             }
-            Log.d(TAG, "Asset folder copied: $assetPath -> $destPath")
+            Log.d(TAG, "Asset文件夹已复制: $assetPath -> $destPath")
         } catch (e: IOException) {
-            Log.e(TAG, "Error copying asset folder", e)
+            Log.e(TAG, "复制asset文件夹时出错", e)
         }
     }
 
     /**
-     * Copy a single asset file to destination
+     * 复制单个asset文件到目标路径
      */
     private fun copyAssetFile(context: Context, assetFilePath: String, destFilePath: String) {
         context.assets.open(assetFilePath).use { input ->

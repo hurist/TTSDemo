@@ -3,7 +3,7 @@ package com.qq.wx.offlinevoice.synthesizer
 import java.io.ByteArrayOutputStream
 
 /**
- * PCM audio processor using Sonic library for pitch and speed manipulation
+ * PCM音频处理器 - 使用Sonic库进行音高和速度调整
  */
 class PcmProcessor(
     private val sampleRate: Int = TtsConstants.SONIC_SAMPLE_RATE,
@@ -16,10 +16,10 @@ class PcmProcessor(
     }
     
     /**
-     * Initialize the Sonic processor with custom settings
-     * @param speed Speed factor (1.0 = normal speed)
-     * @param pitch Pitch factor (1.0 = normal pitch, < 1.0 = lower pitch)
-     * @param rate Playback rate factor
+     * 使用自定义设置初始化Sonic处理器
+     * @param speed 速度因子 (1.0 = 正常速度)
+     * @param pitch 音高因子 (1.0 = 正常音高, < 1.0 = 降低音高)
+     * @param rate 播放速率因子
      */
     fun initialize(
         speed: Float = TtsConstants.SONIC_SPEED,
@@ -37,9 +37,9 @@ class PcmProcessor(
     }
     
     /**
-     * Process PCM data through Sonic (pitch shift and speed change)
-     * @param inputPcm Input PCM data as short array
-     * @return Processed PCM data as short array
+     * 通过Sonic处理PCM数据 (音高变换和速度变化)
+     * @param inputPcm 输入的PCM数据（短整型数组）
+     * @return 处理后的PCM数据（短整型数组）
      */
     fun process(inputPcm: ShortArray): ShortArray {
         val sonicInstance = sonic ?: run {
@@ -47,13 +47,13 @@ class PcmProcessor(
             sonic!!
         }
         
-        // Convert short[] to bytes (little-endian)
+        // 将short[]转换为字节（小端序）
         val inputBytes = shortsToBytes(inputPcm)
         
-        // Write to Sonic
+        // 写入Sonic
         sonicInstance.writeBytesToStream(inputBytes, inputBytes.size)
         
-        // Read processed data from Sonic
+        // 从Sonic读取处理后的数据
         val outputStream = ByteArrayOutputStream(inputBytes.size + 1024)
         val buffer = ByteArray(inputBytes.size + 1024)
         
@@ -67,20 +67,20 @@ class PcmProcessor(
         
         val processedBytes = outputStream.toByteArray()
         
-        // Convert processed bytes back to shorts
+        // 将处理后的字节转换回short数组
         return bytesToShorts(processedBytes)
     }
     
     /**
-     * Flush any remaining data in Sonic's buffer
-     * @return Flushed PCM data as short array
+     * 刷新Sonic缓冲区中的剩余数据
+     * @return 刷新的PCM数据（短整型数组）
      */
     fun flush(): ShortArray {
         val sonicInstance = sonic ?: return ShortArray(0)
         
         sonicInstance.flushStream()
         
-        // Read any remaining processed data from Sonic
+        // 从Sonic读取任何剩余的处理数据
         val outputStream = ByteArrayOutputStream()
         val buffer = ByteArray(4096)
         
@@ -94,19 +94,19 @@ class PcmProcessor(
         
         val processedBytes = outputStream.toByteArray()
         
-        // Convert processed bytes back to shorts
+        // 将处理后的字节转换回short数组
         return bytesToShorts(processedBytes)
     }
     
     /**
-     * Release resources
+     * 释放资源
      */
     fun release() {
         sonic = null
     }
     
     /**
-     * Convert short array to byte array (little-endian)
+     * 将short数组转换为byte数组（小端序）
      */
     private fun shortsToBytes(shorts: ShortArray): ByteArray {
         val bytes = ByteArray(shorts.size * 2)
@@ -121,7 +121,7 @@ class PcmProcessor(
     }
     
     /**
-     * Convert byte array to short array (little-endian)
+     * 将byte数组转换为short数组（小端序）
      */
     private fun bytesToShorts(bytes: ByteArray): ShortArray {
         val numShorts = bytes.size / 2
