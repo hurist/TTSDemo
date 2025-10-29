@@ -10,6 +10,9 @@ class PcmProcessor(
     private val numChannels: Int = TtsConstants.NUM_CHANNELS
 ) {
     private var sonic: Sonic? = null
+    private var currentSpeed: Float = TtsConstants.SONIC_SPEED
+    private var currentPitch: Float = TtsConstants.PITCH_FACTOR
+    private var currentRate: Float = TtsConstants.SONIC_RATE
     
     companion object {
         private const val TAG = "PcmProcessor"
@@ -26,7 +29,16 @@ class PcmProcessor(
         pitch: Float = TtsConstants.PITCH_FACTOR,
         rate: Float = TtsConstants.SONIC_RATE
     ) {
-        if (sonic == null) {
+        // If parameters changed or sonic is null, reinitialize
+        if (sonic == null || speed != currentSpeed || pitch != currentPitch || rate != currentRate) {
+            // Release old instance if exists
+            sonic = null
+            
+            // Create new instance with updated parameters
+            currentSpeed = speed
+            currentPitch = pitch
+            currentRate = rate
+            
             sonic = Sonic(sampleRate, numChannels).apply {
                 setSpeed(speed)
                 setPitch(pitch)
@@ -42,33 +54,44 @@ class PcmProcessor(
      * @return 处理后的PCM数据（短整型数组）
      */
     fun process(inputPcm: ShortArray): ShortArray {
-        val sonicInstance = sonic ?: run {
-            initialize()
-            sonic!!
+        // Validate input
+        if (inputPcm.isEmpty()) {
+            return ShortArray(0)
         }
         
-        // 将short[]转换为字节（小端序）
-        val inputBytes = shortsToBytes(inputPcm)
+        val sonicInstance = sonic ?: run {
+            initialize()
+            sonic ?: return inputPcm  // Return original if initialization fails
+        }
         
-        // 写入Sonic
-        sonicInstance.writeBytesToStream(inputBytes, inputBytes.size)
-        
-        // 从Sonic读取处理后的数据
-        val outputStream = ByteArrayOutputStream(inputBytes.size + 1024)
-        val buffer = ByteArray(inputBytes.size + 1024)
-        
-        var numRead: Int
-        do {
-            numRead = sonicInstance.readBytesFromStream(buffer, buffer.size)
-            if (numRead > 0) {
-                outputStream.write(buffer, 0, numRead)
-            }
-        } while (numRead > 0)
-        
-        val processedBytes = outputStream.toByteArray()
-        
-        // 将处理后的字节转换回short数组
-        return bytesToShorts(processedBytes)
+        try {
+            // 将short[]转换为字节（小端序）
+            val inputBytes = shortsToBytes(inputPcm)
+            
+            // 写入Sonic
+            sonicInstance.writeBytesToStream(inputBytes, inputBytes.size)
+            
+            // 从Sonic读取处理后的数据
+            val outputStream = ByteArrayOutputStream(inputBytes.size + 1024)
+            val buffer = ByteArray(inputBytes.size + 1024)
+            
+            var numRead: Int
+            do {
+                numRead = sonicInstance.readBytesFromStream(buffer, buffer.size)
+                if (numRead > 0) {
+                    outputStream.write(buffer, 0, numRead)
+                }
+            } while (numRead > 0)
+            
+            val processedBytes = outputStream.toByteArray()
+            
+            // 将处理后的字节转换回short数组
+            return bytesToShorts(processedBytes)
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "Error processing PCM data", e)
+            // On error, return original input
+            return inputPcm
+        }
     }
     
     /**
@@ -78,24 +101,29 @@ class PcmProcessor(
     fun flush(): ShortArray {
         val sonicInstance = sonic ?: return ShortArray(0)
         
-        sonicInstance.flushStream()
-        
-        // 从Sonic读取任何剩余的处理数据
-        val outputStream = ByteArrayOutputStream()
-        val buffer = ByteArray(4096)
-        
-        var numRead: Int
-        do {
-            numRead = sonicInstance.readBytesFromStream(buffer, buffer.size)
-            if (numRead > 0) {
-                outputStream.write(buffer, 0, numRead)
-            }
-        } while (numRead > 0)
-        
-        val processedBytes = outputStream.toByteArray()
-        
-        // 将处理后的字节转换回short数组
-        return bytesToShorts(processedBytes)
+        try {
+            sonicInstance.flushStream()
+            
+            // 从Sonic读取任何剩余的处理数据
+            val outputStream = ByteArrayOutputStream()
+            val buffer = ByteArray(4096)
+            
+            var numRead: Int
+            do {
+                numRead = sonicInstance.readBytesFromStream(buffer, buffer.size)
+                if (numRead > 0) {
+                    outputStream.write(buffer, 0, numRead)
+                }
+            } while (numRead > 0)
+            
+            val processedBytes = outputStream.toByteArray()
+            
+            // 将处理后的字节转换回short数组
+            return bytesToShorts(processedBytes)
+        } catch (e: Exception) {
+            android.util.Log.e(TAG, "Error flushing PCM data", e)
+            return ShortArray(0)
+        }
     }
     
     /**

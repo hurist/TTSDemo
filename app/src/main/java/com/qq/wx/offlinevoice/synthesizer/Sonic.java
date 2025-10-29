@@ -795,6 +795,20 @@ public class Sonic {
         int lobePoints = (SINC_TABLE_SIZE-1)/SINC_FILTER_POINTS;
         int left = i*lobePoints + (ratio*lobePoints)/width;
         int right = left + 1;
+        
+        // Add bounds checking to prevent ArrayIndexOutOfBoundsException
+        if (left < 0) {
+            left = 0;
+        } else if (left >= SINC_TABLE_SIZE) {
+            left = SINC_TABLE_SIZE - 1;
+        }
+        
+        if (right < 0) {
+            right = 0;
+        } else if (right >= SINC_TABLE_SIZE) {
+            right = SINC_TABLE_SIZE - 1;
+        }
+        
         int position = i*lobePoints*width + ratio*lobePoints - left*width;
         int leftVal = sincTable[left];
         int rightVal = sincTable[right];
