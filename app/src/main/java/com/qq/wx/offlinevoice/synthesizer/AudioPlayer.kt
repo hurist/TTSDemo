@@ -12,6 +12,11 @@ class AudioPlayer(private val sampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE
     
     private var audioTrack: AudioTrack? = null
     private var playbackThread: Thread? = null
+    @Volatile
+    private var isPaused = false
+    @Volatile
+    private var isStopped = false
+    private var onCompletionListener: (() -> Unit)? = null
     
     companion object {
         private const val TAG = "AudioPlayer"
@@ -20,14 +25,20 @@ class AudioPlayer(private val sampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE
     /**
      * Start playback of PCM audio data
      * @param pcmData Short array containing PCM samples
+     * @param onCompletion Callback invoked when playback completes
      */
-    fun play(pcmData: ShortArray) {
+    fun play(pcmData: ShortArray, onCompletion: (() -> Unit)? = null) {
         stopAndRelease()
         
         if (pcmData.isEmpty()) {
             Log.w(TAG, "PCM data is empty, nothing to play")
+            onCompletion?.invoke()
             return
         }
+        
+        this.onCompletionListener = onCompletion
+        isPaused = false
+        isStopped = false
         
         val channelConfig = AudioFormat.CHANNEL_OUT_MONO
         val audioFormat = AudioFormat.ENCODING_PCM_16BIT
@@ -53,6 +64,10 @@ class AudioPlayer(private val sampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE
             val chunkSize = maxOf(minBufferSize / 2, TtsConstants.CHUNK_SIZE_MIN)
             playbackThread = Thread({
                 playPcmData(pcmData, chunkSize)
+                // Notify completion
+                if (!isStopped && !isPaused) {
+                    onCompletionListener?.invoke()
+                }
             }, "AudioPlaybackThread")
             
             playbackThread?.start()
@@ -60,6 +75,7 @@ class AudioPlayer(private val sampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE
         } catch (e: Exception) {
             Log.e(TAG, "Error starting audio playback", e)
             stopAndRelease()
+            onCompletion?.invoke()
         }
     }
     
@@ -69,7 +85,7 @@ class AudioPlayer(private val sampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE
     private fun playPcmData(pcmData: ShortArray, chunkSize: Int) {
         var offset = 0
         
-        while (!Thread.currentThread().isInterrupted && offset < pcmData.size) {
+        while (!Thread.currentThread().isInterrupted && !isStopped && offset < pcmData.size) {
             val toWrite = minOf(chunkSize, pcmData.size - offset)
             val written = audioTrack?.write(pcmData, offset, toWrite) ?: 0
             
@@ -85,9 +101,26 @@ class AudioPlayer(private val sampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE
     }
     
     /**
+     * Pause playback
+     */
+    fun pause() {
+        isPaused = true
+        audioTrack?.pause()
+    }
+    
+    /**
+     * Resume playback
+     */
+    fun resume() {
+        isPaused = false
+        audioTrack?.play()
+    }
+    
+    /**
      * Stop playback and release resources
      */
     fun stopAndRelease() {
+        isStopped = true
         playbackThread?.let {
             it.interrupt()
             try {
@@ -107,5 +140,6 @@ class AudioPlayer(private val sampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE
             it.release()
         }
         audioTrack = null
+        onCompletionListener = null
     }
 }

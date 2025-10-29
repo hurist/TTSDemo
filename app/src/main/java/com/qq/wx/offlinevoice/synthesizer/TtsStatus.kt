@@ -5,7 +5,7 @@ package com.qq.wx.offlinevoice.synthesizer
  */
 data class TtsStatus(
     /** Current playback state */
-    val state: TtsPlaybackState = TtsPlaybackState.UNINITIALIZED,
+    val state: TtsPlaybackState = TtsPlaybackState.IDLE,
     
     /** Total number of sentences to be read */
     val totalSentences: Int = 0,
@@ -14,8 +14,5 @@ data class TtsStatus(
     val currentSentenceIndex: Int = 0,
     
     /** Text of the current sentence being read */
-    val currentSentence: String = "",
-    
-    /** Error message if state is ERROR */
-    val errorMessage: String? = null
+    val currentSentence: String = ""
 )
