@@ -12,9 +12,9 @@ import kotlin.concurrent.withLock
  * 
  * Features:
  * - Automatic sentence splitting and sequential playback
- * - Pause/resume/stop controls
- * - Comprehensive callback system
- * - State management
+ * - Pause/resume/stop controls with proper position tracking
+ * - Callback-based playback completion (no Thread.sleep loops)
+ * - Simplified state management
  */
 class TtsSynthesizer(
     context: Context,
@@ -25,27 +25,27 @@ class TtsSynthesizer(
     private val voiceDataPath: String
     private val pcmBuffer: ShortBuffer = ShortBuffer.allocate(TtsConstants.PCM_BUFFER_SIZE)
     
-    // State management
+    // State management - simplified to IDLE, PLAYING, PAUSED
     @Volatile
-    private var currentState: TtsPlaybackState = TtsPlaybackState.UNINITIALIZED
+    private var currentState: TtsPlaybackState = TtsPlaybackState.IDLE
     
-    @Volatile
-    private var isPausedFlag: Boolean = false
-    
-    @Volatile
-    private var isStoppedFlag: Boolean = false
-    
-    // Playback queue
+    // Playback queue and position
     private val sentences = mutableListOf<String>()
     private var currentSentenceIndex: Int = 0
     private var currentSpeed: Float = 50f
     private var currentVolume: Float = 50f
     private var currentCallback: TtsCallback? = null
     
+    // Store current sentence PCM data for pause/resume at same position
+    private var currentSentencePcm: MutableList<ShortArray> = mutableListOf()
+    private var currentPcmChunkIndex: Int = 0
+    
     // Thread management
     private var synthesisThread: Thread? = null
     private val stateLock = ReentrantLock()
-    private val pauseLock = Object()
+    
+    @Volatile
+    private var shouldStop = false
     
     // Components
     private val audioPlayer: AudioPlayer = AudioPlayer(TtsConstants.DEFAULT_SAMPLE_RATE)
@@ -90,11 +90,6 @@ class TtsSynthesizer(
     
     override fun initialize() {
         stateLock.withLock {
-            if (currentState != TtsPlaybackState.UNINITIALIZED) {
-                Log.w(TAG, "Already initialized")
-                return
-            }
-            
             try {
                 if (instanceCount.incrementAndGet() == 1) {
                     nativeEngine = SynthesizerNative
@@ -107,7 +102,6 @@ class TtsSynthesizer(
                 Log.d(TAG, "TTS engine initialized successfully")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to initialize TTS engine", e)
-                currentState = TtsPlaybackState.ERROR
                 currentCallback?.onInitialized(false)
                 currentCallback?.onError("Initialization failed: ${e.message}")
             }
@@ -116,15 +110,10 @@ class TtsSynthesizer(
     
     override fun speak(text: String, speed: Float, volume: Float, callback: TtsCallback?) {
         stateLock.withLock {
-            if (currentState == TtsPlaybackState.UNINITIALIZED) {
-                Log.e(TAG, "Cannot speak: TTS engine not initialized")
-                callback?.onError("TTS engine not initialized")
-                return
-            }
-            
+            // Requirement 4: Immediately stop playback and clear previous data before playing new data
             if (currentState == TtsPlaybackState.PLAYING || currentState == TtsPlaybackState.PAUSED) {
-                Log.w(TAG, "Already playing/paused, stopping current playback")
-                stop()
+                Log.d(TAG, "Stopping current playback before starting new")
+                stopInternal()
             }
             
             // Split text into sentences
@@ -139,12 +128,14 @@ class TtsSynthesizer(
             
             Log.d(TAG, "Split text into ${sentences.size} sentences")
             
+            // Initialize playback state
             currentSentenceIndex = 0
             currentSpeed = speed
             currentVolume = volume
             currentCallback = callback
-            isPausedFlag = false
-            isStoppedFlag = false
+            currentSentencePcm.clear()
+            currentPcmChunkIndex = 0
+            shouldStop = false
             
             // Start synthesis thread
             synthesisThread = Thread({
@@ -161,11 +152,11 @@ class TtsSynthesizer(
                 return
             }
             
-            isPausedFlag = true
-            audioPlayer.stopAndRelease()
+            // Pause audio player without clearing data
+            audioPlayer.pause()
             updateState(TtsPlaybackState.PAUSED)
             currentCallback?.onPaused()
-            Log.d(TAG, "Playback paused")
+            Log.d(TAG, "Playback paused at sentence $currentSentenceIndex, chunk $currentPcmChunkIndex")
         }
     }
     
@@ -176,57 +167,60 @@ class TtsSynthesizer(
                 return
             }
             
-            isPausedFlag = false
             updateState(TtsPlaybackState.PLAYING)
             currentCallback?.onResumed()
-            Log.d(TAG, "Playback resumed")
+            Log.d(TAG, "Playback resumed from sentence $currentSentenceIndex, chunk $currentPcmChunkIndex")
             
-            // Notify waiting thread
-            synchronized(pauseLock) {
-                pauseLock.notifyAll()
-            }
+            // Resume audio player or continue from paused position
+            audioPlayer.resume()
+            
+            // If audio player was stopped, restart from current chunk
+            Thread {
+                continuePlayback()
+            }.start()
         }
     }
     
     override fun stop() {
         stateLock.withLock {
-            if (currentState == TtsPlaybackState.IDLE || currentState == TtsPlaybackState.STOPPING) {
-                return
-            }
-            
-            Log.d(TAG, "Stopping playback")
-            isStoppedFlag = true
-            isPausedFlag = false
-            
-            // Wake up paused thread
-            synchronized(pauseLock) {
-                pauseLock.notifyAll()
-            }
-            
-            updateState(TtsPlaybackState.STOPPING)
-            audioPlayer.stopAndRelease()
-            
-            // Reset native engine
-            if (voiceCode == currentVoiceCode) {
-                nativeEngine?.reset()
-            }
-            
-            // Wait for synthesis thread to finish
-            synthesisThread?.let { thread ->
-                if (thread.isAlive && Thread.currentThread() != thread) {
-                    try {
-                        thread.join(2000) // Wait up to 2 seconds
-                    } catch (e: InterruptedException) {
-                        Log.w(TAG, "Interrupted while waiting for synthesis thread")
-                    }
+            stopInternal()
+        }
+    }
+    
+    /**
+     * Internal stop method (must be called within stateLock)
+     */
+    private fun stopInternal() {
+        if (currentState == TtsPlaybackState.IDLE) {
+            return
+        }
+        
+        Log.d(TAG, "Stopping playback")
+        shouldStop = true
+        audioPlayer.stopAndRelease()
+        
+        // Reset native engine
+        if (voiceCode == currentVoiceCode) {
+            nativeEngine?.reset()
+        }
+        
+        // Wait for synthesis thread to finish
+        synthesisThread?.let { thread ->
+            if (thread.isAlive && Thread.currentThread() != thread) {
+                try {
+                    thread.join(2000) // Wait up to 2 seconds
+                } catch (e: InterruptedException) {
+                    Log.w(TAG, "Interrupted while waiting for synthesis thread")
                 }
             }
-            synthesisThread = null
-            
-            sentences.clear()
-            currentSentenceIndex = 0
-            updateState(TtsPlaybackState.IDLE)
         }
+        synthesisThread = null
+        
+        sentences.clear()
+        currentSentenceIndex = 0
+        currentSentencePcm.clear()
+        currentPcmChunkIndex = 0
+        updateState(TtsPlaybackState.IDLE)
     }
     
     override fun getStatus(): TtsStatus {
@@ -252,6 +246,7 @@ class TtsSynthesizer(
     
     /**
      * Main speech execution method - processes all sentences in queue
+     * Uses callback-based approach instead of Thread.sleep loops
      */
     private fun executeSpeech() {
         try {
@@ -259,60 +254,132 @@ class TtsSynthesizer(
             currentCallback?.onSynthesisStart()
             
             // Process each sentence
-            while (currentSentenceIndex < sentences.size && !isStoppedFlag) {
-                // Check if paused
-                checkPauseState()
-                
-                if (isStoppedFlag) break
-                
-                val sentence = sentences[currentSentenceIndex]
-                Log.d(TAG, "Speaking sentence $currentSentenceIndex: $sentence")
-                
-                // Notify sentence start
-                currentCallback?.onSentenceStart(
-                    currentSentenceIndex,
-                    sentence,
-                    sentences.size
-                )
-                
-                // Synthesize and play this sentence
-                val success = synthesizeSentence(sentence)
-                
-                if (!success || isStoppedFlag) {
-                    break
-                }
-                
-                // Notify sentence complete
-                currentCallback?.onSentenceComplete(currentSentenceIndex, sentence)
-                
-                currentSentenceIndex++
-            }
-            
-            // Check if we completed all sentences
-            if (currentSentenceIndex >= sentences.size && !isStoppedFlag) {
-                Log.d(TAG, "All sentences completed")
-                currentCallback?.onSynthesisComplete()
-            }
+            processNextSentence()
             
         } catch (e: Exception) {
             Log.e(TAG, "Error during speech execution", e)
-            updateState(TtsPlaybackState.ERROR)
             currentCallback?.onError("Speech execution error: ${e.message}")
-        } finally {
-            if (!isPausedFlag && currentState != TtsPlaybackState.PAUSED) {
-                stateLock.withLock {
-                    if (currentState != TtsPlaybackState.IDLE) {
-                        updateState(TtsPlaybackState.IDLE)
-                    }
+            stateLock.withLock {
+                updateState(TtsPlaybackState.IDLE)
+            }
+        }
+    }
+    
+    /**
+     * Process next sentence recursively using callbacks (Requirement 1)
+     */
+    private fun processNextSentence() {
+        stateLock.withLock {
+            if (shouldStop || currentSentenceIndex >= sentences.size) {
+                // All done
+                if (currentSentenceIndex >= sentences.size && !shouldStop) {
+                    Log.d(TAG, "All sentences completed")
+                    currentCallback?.onSynthesisComplete()
+                }
+                updateState(TtsPlaybackState.IDLE)
+                return
+            }
+            
+            if (currentState == TtsPlaybackState.PAUSED) {
+                // Paused, don't continue
+                return
+            }
+        }
+        
+        val sentence = sentences[currentSentenceIndex]
+        Log.d(TAG, "Processing sentence $currentSentenceIndex: $sentence")
+        
+        // Notify sentence start
+        currentCallback?.onSentenceStart(
+            currentSentenceIndex,
+            sentence,
+            sentences.size
+        )
+        
+        // Synthesize this sentence and collect all PCM chunks
+        val success = synthesizeSentenceAndPlay(sentence)
+        
+        if (!success || shouldStop) {
+            stateLock.withLock {
+                updateState(TtsPlaybackState.IDLE)
+            }
+            return
+        }
+        
+        // Sentence complete callback will be called after playback finishes
+    }
+    
+    /**
+     * Continue playback from paused position (Requirement 2)
+     */
+    private fun continuePlayback() {
+        stateLock.withLock {
+            if (currentState != TtsPlaybackState.PLAYING) {
+                return
+            }
+            
+            // Resume from current chunk in current sentence
+            if (currentPcmChunkIndex < currentSentencePcm.size) {
+                playPcmChunksFromIndex(currentPcmChunkIndex)
+            } else {
+                // Current sentence done, move to next
+                moveToNextSentence()
+            }
+        }
+    }
+    
+    /**
+     * Play PCM chunks starting from a specific index (for resume)
+     */
+    private fun playPcmChunksFromIndex(startIndex: Int) {
+        if (startIndex >= currentSentencePcm.size) {
+            moveToNextSentence()
+            return
+        }
+        
+        val pcmData = currentSentencePcm[startIndex]
+        currentPcmChunkIndex = startIndex
+        
+        // Play with completion callback (Requirement 1: callback-based instead of Thread.sleep)
+        audioPlayer.play(pcmData) {
+            // Playback completed callback
+            stateLock.withLock {
+                if (shouldStop || currentState != TtsPlaybackState.PLAYING) {
+                    return@withLock
+                }
+                
+                currentPcmChunkIndex++
+                
+                if (currentPcmChunkIndex < currentSentencePcm.size) {
+                    // More chunks in this sentence
+                    playPcmChunksFromIndex(currentPcmChunkIndex)
+                } else {
+                    // Sentence complete
+                    moveToNextSentence()
                 }
             }
         }
     }
     
     /**
-     * Synthesize and play a single sentence
+     * Move to next sentence and start processing
      */
-    private fun synthesizeSentence(sentence: String): Boolean {
+    private fun moveToNextSentence() {
+        val completedSentence = sentences[currentSentenceIndex]
+        currentCallback?.onSentenceComplete(currentSentenceIndex, completedSentence)
+        
+        currentSentenceIndex++
+        currentSentencePcm.clear()
+        currentPcmChunkIndex = 0
+        
+        // Process next sentence (callback-based recursion)
+        processNextSentence()
+    }
+    
+    /**
+     * Synthesize a sentence and play all its PCM chunks
+     */
+    private fun synthesizeSentenceAndPlay(sentence: String): Boolean {
         try {
             // Prepare synthesis
             val prepareResult = prepareForSynthesis(sentence, currentSpeed, currentVolume)
@@ -323,12 +390,19 @@ class TtsSynthesizer(
             }
             
             pcmProcessor.initialize()
+            currentSentencePcm.clear()
+            currentPcmChunkIndex = 0
             
             val synthResult = IntArray(1)
             val pcmArray = pcmBuffer.array()
             
-            // Synthesis loop for this sentence
-            while (!isStoppedFlag && !isPausedFlag) {
+            // Synthesis loop - collect all PCM chunks for this sentence
+            while (!shouldStop) {
+                if (currentState == TtsPlaybackState.PAUSED) {
+                    // Paused during synthesis, stop synthesizing but keep what we have
+                    return true
+                }
+                
                 val synthesisStatus = nativeEngine?.synthesize(
                     pcmArray,
                     TtsConstants.PCM_BUFFER_SIZE,
@@ -344,7 +418,7 @@ class TtsSynthesizer(
                 
                 val numSamples = synthResult[0]
                 if (numSamples <= 0) {
-                    break
+                    break // Sentence synthesis complete
                 }
                 
                 // Extract valid PCM data
@@ -354,22 +428,29 @@ class TtsSynthesizer(
                 // Process PCM (pitch shift, speed change)
                 val processedPcm = pcmProcessor.process(validPcm)
                 
-                // Play processed audio
-                if (!isStoppedFlag && !isPausedFlag) {
-                    audioPlayer.play(processedPcm)
-                    
-                    // Wait for playback
-                    Thread.sleep(TtsConstants.PLAYBACK_SLEEP_MS)
-                }
-                
-                // Check pause state
-                checkPauseState()
+                // Store PCM chunk for this sentence (for pause/resume support)
+                currentSentencePcm.add(processedPcm)
             }
             
             // Flush remaining data
-            pcmProcessor.flush()
+            val flushedPcm = pcmProcessor.flush()
+            if (flushedPcm.isNotEmpty()) {
+                currentSentencePcm.add(flushedPcm)
+            }
             
-            return !isStoppedFlag
+            if (shouldStop) {
+                return false
+            }
+            
+            // Start playing all chunks using callback-based approach
+            if (currentSentencePcm.isNotEmpty()) {
+                playPcmChunksFromIndex(0)
+            } else {
+                // No PCM data, move to next sentence
+                moveToNextSentence()
+            }
+            
+            return true
             
         } catch (e: Exception) {
             Log.e(TAG, "Error synthesizing sentence", e)
@@ -377,23 +458,6 @@ class TtsSynthesizer(
             return false
         } finally {
             nativeEngine?.reset()
-        }
-    }
-    
-    /**
-     * Check if paused and wait until resumed
-     */
-    private fun checkPauseState() {
-        while (isPausedFlag && !isStoppedFlag) {
-            synchronized(pauseLock) {
-                try {
-                    pauseLock.wait(500)
-                } catch (e: InterruptedException) {
-                    Log.w(TAG, "Interrupted while paused")
-                    Thread.currentThread().interrupt()
-                    break
-                }
-            }
         }
     }
     
@@ -440,7 +504,7 @@ class TtsSynthesizer(
     override fun release() {
         stateLock.withLock {
             Log.d(TAG, "Releasing TTS engine")
-            stop()
+            stopInternal()
             
             if (instanceCount.decrementAndGet() == 0) {
                 nativeEngine?.destroy()
@@ -450,7 +514,7 @@ class TtsSynthesizer(
             
             audioPlayer.stopAndRelease()
             pcmProcessor.release()
-            currentState = TtsPlaybackState.UNINITIALIZED
+            currentState = TtsPlaybackState.IDLE
         }
     }
     

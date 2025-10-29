@@ -12,26 +12,23 @@ class TtsDataClassesTest {
     
     @Test
     fun testPlaybackStateEnumValues() {
-        // Verify all expected states exist
+        // Verify all expected states exist (simplified to 3 states)
         val states = TtsPlaybackState.values()
         
-        assertTrue(states.contains(TtsPlaybackState.UNINITIALIZED))
+        assertEquals(3, states.size)
         assertTrue(states.contains(TtsPlaybackState.IDLE))
         assertTrue(states.contains(TtsPlaybackState.PLAYING))
         assertTrue(states.contains(TtsPlaybackState.PAUSED))
-        assertTrue(states.contains(TtsPlaybackState.STOPPING))
-        assertTrue(states.contains(TtsPlaybackState.ERROR))
     }
     
     @Test
     fun testTtsStatusDefaultValues() {
         val status = TtsStatus()
         
-        assertEquals(TtsPlaybackState.UNINITIALIZED, status.state)
+        assertEquals(TtsPlaybackState.IDLE, status.state)
         assertEquals(0, status.totalSentences)
         assertEquals(0, status.currentSentenceIndex)
         assertEquals("", status.currentSentence)
-        assertNull(status.errorMessage)
     }
     
     @Test
@@ -40,26 +37,13 @@ class TtsDataClassesTest {
             state = TtsPlaybackState.PLAYING,
             totalSentences = 5,
             currentSentenceIndex = 2,
-            currentSentence = "这是第三句",
-            errorMessage = null
+            currentSentence = "这是第三句"
         )
         
         assertEquals(TtsPlaybackState.PLAYING, status.state)
         assertEquals(5, status.totalSentences)
         assertEquals(2, status.currentSentenceIndex)
         assertEquals("这是第三句", status.currentSentence)
-        assertNull(status.errorMessage)
-    }
-    
-    @Test
-    fun testTtsStatusWithError() {
-        val status = TtsStatus(
-            state = TtsPlaybackState.ERROR,
-            errorMessage = "Synthesis failed"
-        )
-        
-        assertEquals(TtsPlaybackState.ERROR, status.state)
-        assertEquals("Synthesis failed", status.errorMessage)
     }
     
     @Test
@@ -104,5 +88,24 @@ class TtsDataClassesTest {
         // Calculate progress percentage
         val progress = (status.currentSentenceIndex.toFloat() / status.totalSentences * 100).toInt()
         assertEquals(50, progress)
+    }
+    
+    @Test
+    fun testStateTransitions() {
+        // Test valid state transitions
+        var status = TtsStatus(state = TtsPlaybackState.IDLE)
+        assertEquals(TtsPlaybackState.IDLE, status.state)
+        
+        status = status.copy(state = TtsPlaybackState.PLAYING)
+        assertEquals(TtsPlaybackState.PLAYING, status.state)
+        
+        status = status.copy(state = TtsPlaybackState.PAUSED)
+        assertEquals(TtsPlaybackState.PAUSED, status.state)
+        
+        status = status.copy(state = TtsPlaybackState.PLAYING)
+        assertEquals(TtsPlaybackState.PLAYING, status.state)
+        
+        status = status.copy(state = TtsPlaybackState.IDLE)
+        assertEquals(TtsPlaybackState.IDLE, status.state)
     }
 }

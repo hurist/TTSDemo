@@ -73,9 +73,29 @@ class PcmProcessor(
     
     /**
      * Flush any remaining data in Sonic's buffer
+     * @return Flushed PCM data as short array
      */
-    fun flush() {
-        sonic?.flushStream()
+    fun flush(): ShortArray {
+        val sonicInstance = sonic ?: return ShortArray(0)
+        
+        sonicInstance.flushStream()
+        
+        // Read any remaining processed data from Sonic
+        val outputStream = ByteArrayOutputStream()
+        val buffer = ByteArray(4096)
+        
+        var numRead: Int
+        do {
+            numRead = sonicInstance.readBytesFromStream(buffer, buffer.size)
+            if (numRead > 0) {
+                outputStream.write(buffer, 0, numRead)
+            }
+        } while (numRead > 0)
+        
+        val processedBytes = outputStream.toByteArray()
+        
+        // Convert processed bytes back to shorts
+        return bytesToShorts(processedBytes)
     }
     
     /**
