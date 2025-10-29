@@ -6,7 +6,8 @@ import android.media.AudioTrack
 import android.util.Log
 
 /**
- * Audio player for PCM data playback using AudioTrack
+ * 音频播放器 - 使用AudioTrack播放PCM数据
+ * 支持暂停后从精确位置恢复播放
  */
 class AudioPlayer(private val sampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE) {
     
@@ -18,15 +19,21 @@ class AudioPlayer(private val sampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE
     private var isStopped = false
     private var onCompletionListener: (() -> Unit)? = null
     
+    // 保存当前播放的PCM数据和位置，用于暂停后恢复
+    private var currentPcmData: ShortArray? = null
+    @Volatile
+    private var currentOffset: Int = 0
+    private var currentChunkSize: Int = 0
+    
     companion object {
         private const val TAG = "AudioPlayer"
     }
     
     /**
-     * Start playback of PCM audio data
-     * @param pcmData Short array containing PCM samples
-     * @param volume Volume level (0.0 to 1.0)
-     * @param onCompletion Callback invoked when playback completes
+     * 开始播放PCM音频数据
+     * @param pcmData 包含PCM采样的短整型数组
+     * @param volume 音量级别 (0.0 到 1.0)
+     * @param onCompletion 播放完成时调用的回调
      */
     fun play(pcmData: ShortArray, volume: Float = 1.0f, onCompletion: (() -> Unit)? = null) {
         stopAndRelease()
@@ -37,6 +44,9 @@ class AudioPlayer(private val sampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE
             return
         }
         
+        // 保存当前播放数据，用于暂停后恢复
+        this.currentPcmData = pcmData
+        this.currentOffset = 0
         this.onCompletionListener = onCompletion
         isPaused = false
         isStopped = false
@@ -60,16 +70,16 @@ class AudioPlayer(private val sampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE
                 AudioTrack.MODE_STREAM
             )
             
-            // Set volume to match the requested level (Issue 1 fix)
+            // 设置音量匹配请求的级别
             val clampedVolume = volume.coerceIn(0.0f, 1.0f)
             audioTrack?.setStereoVolume(clampedVolume, clampedVolume)
             
             audioTrack?.play()
             
-            val chunkSize = maxOf(minBufferSize / 2, TtsConstants.CHUNK_SIZE_MIN)
+            currentChunkSize = maxOf(minBufferSize / 2, TtsConstants.CHUNK_SIZE_MIN)
             playbackThread = Thread({
-                playPcmData(pcmData, chunkSize)
-                // Notify completion
+                playPcmData(pcmData, currentChunkSize)
+                // 通知播放完成
                 if (!isStopped && !isPaused) {
                     onCompletionListener?.invoke()
                 }
@@ -85,17 +95,29 @@ class AudioPlayer(private val sampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE
     }
     
     /**
-     * Internal method to write PCM data to AudioTrack
+     * 内部方法 - 将PCM数据写入AudioTrack
+     * 支持暂停后从中断位置继续
      */
     private fun playPcmData(pcmData: ShortArray, chunkSize: Int) {
-        var offset = 0
+        var offset = currentOffset
         
         while (!Thread.currentThread().isInterrupted && !isStopped && offset < pcmData.size) {
+            // 检查是否暂停
+            if (isPaused) {
+                // 保存当前位置
+                currentOffset = offset
+                Log.d(TAG, "Playback paused at offset: $offset/${pcmData.size}")
+                break
+            }
+            
             val toWrite = minOf(chunkSize, pcmData.size - offset)
             val written = audioTrack?.write(pcmData, offset, toWrite) ?: 0
             
             when {
-                written > 0 -> offset += written
+                written > 0 -> {
+                    offset += written
+                    currentOffset = offset // 实时更新当前位置
+                }
                 written == AudioTrack.ERROR_INVALID_OPERATION || 
                 written == AudioTrack.ERROR_BAD_VALUE -> {
                     Log.e(TAG, "AudioTrack write error: $written")
@@ -103,33 +125,66 @@ class AudioPlayer(private val sampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE
                 }
             }
         }
+        
+        // 播放完成，重置位置
+        if (offset >= pcmData.size) {
+            currentOffset = 0
+        }
     }
     
     /**
-     * Pause playback
+     * 暂停播放
      */
     fun pause() {
-        isPaused = true
-        audioTrack?.pause()
+        if (!isPaused && audioTrack != null) {
+            isPaused = true
+            audioTrack?.pause()
+            Log.d(TAG, "Audio paused at position: $currentOffset")
+        }
     }
     
     /**
-     * Resume playback
+     * 恢复播放 - 从暂停的位置继续
      */
     fun resume() {
-        isPaused = false
-        audioTrack?.play()
+        if (isPaused && currentPcmData != null) {
+            isPaused = false
+            
+            // 如果AudioTrack还存在，直接恢复
+            if (audioTrack != null) {
+                audioTrack?.play()
+                Log.d(TAG, "Audio resumed from position: $currentOffset")
+                
+                // 继续播放线程
+                playbackThread = Thread({
+                    currentPcmData?.let { pcmData ->
+                        playPcmData(pcmData, currentChunkSize)
+                        // 通知播放完成
+                        if (!isStopped && !isPaused && currentOffset >= pcmData.size) {
+                            onCompletionListener?.invoke()
+                        }
+                    }
+                }, "AudioPlaybackThread-Resume")
+                playbackThread?.start()
+            } else {
+                // AudioTrack已释放，需要重新创建并从保存的位置继续
+                Log.d(TAG, "Recreating AudioTrack to resume from position: $currentOffset")
+                currentPcmData?.let { pcmData ->
+                    play(pcmData, 1.0f, onCompletionListener)
+                }
+            }
+        }
     }
     
     /**
-     * Stop playback and release resources
+     * 停止播放并释放资源
      */
     fun stopAndRelease() {
         isStopped = true
         playbackThread?.let {
             it.interrupt()
             try {
-                it.join(1000) // Wait up to 1 second for thread to finish
+                it.join(1000) // 等待最多1秒让线程结束
             } catch (e: InterruptedException) {
                 Log.w(TAG, "Interrupted while waiting for playback thread to finish")
             }
@@ -146,5 +201,7 @@ class AudioPlayer(private val sampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE
         }
         audioTrack = null
         onCompletionListener = null
+        currentPcmData = null
+        currentOffset = 0
     }
 }
