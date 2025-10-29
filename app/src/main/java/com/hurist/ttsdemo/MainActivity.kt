@@ -50,8 +50,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var textViewSpeed: TextView
 
     // 可用的发音人列表
-    private val availableVoices = listOf("pb", "fn", "ml", "yy")
-    private var currentVoice = "pb"
+    private val availableVoices = listOf("enfemale", "enmale", "F191", "fn", "lsl", "M206", "newsman", "pb")
+    private var currentVoice = "lsl"
 
     companion object {
         private const val TAG = "MainActivity"
