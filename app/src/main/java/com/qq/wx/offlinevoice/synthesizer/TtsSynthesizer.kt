@@ -539,7 +539,8 @@ class TtsSynthesizer(
                 return null
             }
             
-            pcmProcessor.initialize()
+            // Initialize PcmProcessor with current speed
+            pcmProcessor.initialize(speed = currentSpeed)
             val pcmChunks = mutableListOf<ShortArray>()
             
             val synthResult = IntArray(1)
@@ -572,13 +573,20 @@ class TtsSynthesizer(
                 
                 // 提取有效的PCM数据
                 val validSamples = minOf(pcmArray.size, numSamples)
+                if (validSamples <= 0) {
+                    Log.w(TAG, "无效的PCM样本数: $validSamples")
+                    break
+                }
+                
                 val validPcm = pcmArray.copyOf(validSamples)
                 
                 // 处理PCM（音高变换、速度变化）
                 val processedPcm = pcmProcessor.process(validPcm)
                 
-                // 存储此句子的PCM块
-                pcmChunks.add(processedPcm)
+                // Only add if processing was successful
+                if (processedPcm.isNotEmpty()) {
+                    pcmChunks.add(processedPcm)
+                }
             }
             
             // 刷新剩余数据

@@ -790,11 +790,26 @@ public class Sonic {
         removePitchSamples(position);
     }
 
+    // Clamp index to valid range for sincTable array
+    private int clampToSincTableBounds(int index) {
+        if (index < 0) {
+            return 0;
+        } else if (index >= SINC_TABLE_SIZE) {
+            return SINC_TABLE_SIZE - 1;
+        }
+        return index;
+    }
+    
     // Approximate the sinc function times a Hann window from the sinc table.
     private int findSincCoefficient(int i, int ratio, int width) {
         int lobePoints = (SINC_TABLE_SIZE-1)/SINC_FILTER_POINTS;
         int left = i*lobePoints + (ratio*lobePoints)/width;
         int right = left + 1;
+        
+        // Add bounds checking to prevent ArrayIndexOutOfBoundsException
+        left = clampToSincTableBounds(left);
+        right = clampToSincTableBounds(right);
+        
         int position = i*lobePoints*width + ratio*lobePoints - left*width;
         int leftVal = sincTable[left];
         int rightVal = sincTable[right];
