@@ -13,11 +13,6 @@ import java.io.ByteArrayOutputStream;
 import java.nio.ShortBuffer;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import be.tarsos.dsp.AudioEvent;
-import be.tarsos.dsp.AudioProcessor;
-import be.tarsos.dsp.io.TarsosDSPAudioFloatConverter;
-import be.tarsos.dsp.io.TarsosDSPAudioFormat;
-
 /* loaded from: classes3.dex */
 public final class a implements h {
 
