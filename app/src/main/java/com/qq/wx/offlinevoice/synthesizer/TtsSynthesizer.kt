@@ -352,7 +352,9 @@ class TtsSynthesizer(
                 
                 if (currentPcmChunkIndex < currentSentencePcm.size) {
                     // More chunks in this sentence
+                    //Thread.sleep(1000)
                     playPcmChunksFromIndex(currentPcmChunkIndex)
+                    Log.d(TAG, "Playing next PCM chunk $currentPcmChunkIndex of sentence $currentSentenceIndex")
                 } else {
                     // Sentence complete
                     moveToNextSentence()

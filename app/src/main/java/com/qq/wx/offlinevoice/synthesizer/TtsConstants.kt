@@ -6,7 +6,7 @@ package com.qq.wx.offlinevoice.synthesizer
 object TtsConstants {
     // Audio Configuration
     const val DEFAULT_SAMPLE_RATE = 24000
-    const val SONIC_SAMPLE_RATE = 16000
+    const val SONIC_SAMPLE_RATE = 24000
     const val NUM_CHANNELS = 1
     const val PCM_BUFFER_SIZE = 64000
     
