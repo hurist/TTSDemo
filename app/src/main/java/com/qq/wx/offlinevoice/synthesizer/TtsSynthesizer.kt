@@ -524,7 +524,8 @@ class TtsSynthesizer(
             offset += chunk.size
         }
         
-        Log.d(TAG, "Merged ${chunks.size} PCM chunks into single buffer of size $totalSize")
+        // Use verbose logging to avoid log spam in production
+        Log.v(TAG, "Merged ${chunks.size} PCM chunks into single buffer of size $totalSize")
         return merged
     }
     
