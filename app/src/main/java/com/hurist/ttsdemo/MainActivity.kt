@@ -10,7 +10,6 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import com.qq.wx.offlinevoice.synthesizer.Speaker
 import com.qq.wx.offlinevoice.synthesizer.TtsSynthesizer
-import com.qq.wx.offlinevoice.synthesizer.a
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -67,24 +66,7 @@ class MainActivity : AppCompatActivity() {
         
         Log.d(TAG, "TTS synthesis started with new API")
     }
-    
-    /**
-     * Example using the legacy API (for backward compatibility)
-     */
-    @Suppress("DEPRECATION")
-    private fun useLegacyApiExample() {
-        val speaker = Speaker().apply {
-            code = "fn"
-        }
-        
-        val legacySynthesizer = a(this, speaker)
-        legacySynthesizer.c() // initialize
-        
-        val text = "这是使用旧API的示例文本。"
-        legacySynthesizer.d(50f, 50f, text, null)
-        
-        Log.d(TAG, "TTS synthesis started with legacy API")
-    }
+
 
     /**
      * Copy voice data files from assets to external storage

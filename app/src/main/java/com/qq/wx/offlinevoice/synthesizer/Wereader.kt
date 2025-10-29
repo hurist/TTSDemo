@@ -3,31 +3,7 @@ package com.qq.wx.offlinevoice.synthesizer
 import android.content.Context
 import java.nio.charset.StandardCharsets
 
-/**
- * TTS 配置路径管理类
- */
-class TtsVoiceManager(context: Context/*, speaker: Speaker*/) {
 
-    //val speakerCode: String = speaker.code
-    val voiceFolderPath: String
-
-    init {
-        val sb = StringBuilder()
-        PathUtils.appendExternalVoicePath(
-            byteArrayOf(68, 111, 42, 100, -19),
-            byteArrayOf(50, 0, 67, 7, -120, 65, 34, 26), // Ascii.SUB = 26
-            context,
-            sb
-        )
-        voiceFolderPath = PathUtils.appendDecodedString(
-            byteArrayOf(-105, 16, 22, -80, -70, 86, 114), // Ascii.DLE = 16, Ascii.SYN = 22
-            byteArrayOf(-72, 103, 115, -62, -33, 55, 22, -27),
-            sb
-        )
-    }
-}
-
-// --------------------------- 工具类 ---------------------------
 
 object PathUtils {
 
@@ -54,8 +30,7 @@ object XorDecoder {
 
     /**
      * 使用异或算法解码 ByteArray 并返回 UTF-8 字符串
-     */
-    fun decode(data: ByteArray, key: ByteArray): String {
+     */    fun decode(data: ByteArray, key: ByteArray): String {
         var keyIndex = 0
         for (i in data.indices) {
             if (keyIndex >= key.size) keyIndex = 0
