@@ -52,7 +52,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var textViewSpeed: TextView
 
     // 可用的发音人列表
-    private val availableVoices = listOf("enfemale", "enmale", "F191", "fn", "lsl", "M206", "newsman", "pb")
+    private val availableVoices = listOf("dtn", "F191", "femaleen", "lsl", "maleen")
     private var currentVoice = "lsl"
 
     companion object {
@@ -98,9 +98,16 @@ class MainActivity : AppCompatActivity() {
         textViewSpeed = findViewById(R.id.textViewSpeed)
         
         // 设置默认文本
-        editTextInput.setText("""一顆年輕的終於在世俗中成熟起來。厭倦的枯燥乏味的生活都成了一種習慣。慵懶地呼吸著混凝土與柏油路吐出的空氣。眼睛在高樓大廈間穿梭，尋覓心走過的路。
-
-曾經喜歡一個人流浪在農村空曠的田野上，任心追逐淡而深情的泥土味，徘徊在莊稼與野草間。偶而拽著風的白褶裙隨它在深遂的天宇中飛翔。樹淩亂而尊嚴地站著，紳士般，沒有因葉子的交雜而產生的擁擠與不堪。低雁飛鵲悠閑地在風中散步。偶而會瞥一下孤獨的流浪人。遲緩地低鳴宣布著身體地倦怠。風吹來，撩撥著內心的清純與恬靜，像小貓從桌台跳到地板上那樣輕，生怕驚覺現實而荒蕪的心。""".trimIndent())
+        editTextInput.setText("""那天傍晚，风有点凉。
+“你要走了吗？”她轻声问。
+李行停下脚步，微微一笑：“走一趟很长的路。”
+“长？多长？”
+“也许是一辈子。”
+他的话像风一样飘散。远处传来几声狗叫，街灯一盏盏亮起。
+他回头望了她一眼，那一瞬间，仿佛所有的往事都被藏在了她的眼里——明亮，却又带着一丝悲伤。
+她忽然笑了：“那我等你回来，当作……一种乐趣吧。”
+李行愣了愣，也笑了，“乐”这个字，在风里轻轻回荡着。
+夜色重了，雨点开始落下……一切都像没发生过似的。""".trimIndent())
         
         // 设置语速滑动条 (0.5x到3.0x，步进0.1，默认1.0x)
         // SeekBar范围: 0-25，映射到0.5-3.0

@@ -347,7 +347,7 @@ class TtsSynthesizer(
             try {
                 val prepareResult = prepareForSynthesis(sentence, currentSpeed, currentVolume)
                 if (prepareResult != 0) {
-                    sendCommand(Command.InternalError("准备句子失败: $sentence"))
+                    sendCommand(Command.InternalError("准备句子失败$prepareResult: $sentence"))
                     return@withLock false
                 }
                 val synthResult = IntArray(1)
