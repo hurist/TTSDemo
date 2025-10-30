@@ -12,6 +12,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -20,8 +23,8 @@ import kotlinx.coroutines.sync.withLock
 /**
  * 文本转语音合成器（命令处理器架构）
  *
- * [最终修复] 修复了 onSynthesisComplete 后调用 speak 无声的问题。
- * 关键在于 handleStop 和 handleSpeak 的逻辑调整，正确复用处于 IDLE 状态的 AudioPlayer。
+ * [新增] 暴露 isPlaying: StateFlow<Boolean> 给UI层，用于响应式状态更新。
+ * [修改点] 强化了 pause/resume 的状态检查，使其更加健壮。
  */
 class TtsSynthesizer(
     context: Context,
@@ -54,6 +57,10 @@ class TtsSynthesizer(
     private var currentVolume: Float = 1.0f
     private var currentVoice: String = voiceName
     private var currentCallback: TtsCallback? = null
+
+    // [新增] 用于向UI层暴露状态的 StateFlow
+    private val _isPlaying = MutableStateFlow(false)
+    val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
 
     private val voiceCode: String = voiceName
     private val voiceDataPath: String
@@ -110,17 +117,14 @@ class TtsSynthesizer(
     fun setSpeed(speed: Float) = sendCommand(Command.SetSpeed(speed))
     fun setVolume(volume: Float) = sendCommand(Command.SetVolume(volume))
     fun setVoice(voiceName: String) = sendCommand(Command.SetVoice(voiceName))
-
-    // [修改点] speak 方法不再需要发送 Stop 命令，handleSpeak 会处理好状态转换
-    fun speak(text: String) {
-        sendCommand(Command.Speak(text))
-    }
-
+    fun speak(text: String) = sendCommand(Command.Speak(text))
     fun pause() = sendCommand(Command.Pause)
     fun resume() = sendCommand(Command.Resume)
     fun stop() = sendCommand(Command.Stop)
     fun release() = sendCommand(Command.Release)
-    fun isSpeaking(): Boolean = currentState == TtsPlaybackState.PLAYING
+
+    fun isSpeaking(): Boolean = isPlaying.value
+
     fun getStatus(): TtsStatus {
         val i = playingSentenceIndex.coerceAtMost(sentences.size - 1).coerceAtLeast(0)
         val currentSentence = if (sentences.isNotEmpty() && i in sentences.indices) sentences[i] else ""
@@ -165,7 +169,7 @@ class TtsSynthesizer(
                         currentCallback?.onSynthesisComplete()
                     }
                 }
-                is Command.InternalSynthesisFinished -> { }
+                is Command.InternalSynthesisFinished -> { /* No action needed */ }
                 is Command.InternalError -> {
                     handleStop()
                     currentCallback?.onError(command.message)
@@ -174,15 +178,12 @@ class TtsSynthesizer(
         }
     }
 
-    // [修改点] handleSpeak 现在负责处理从任何状态开始播放的逻辑
     private suspend fun handleSpeak(text: String) {
-        // 如果当前正在播放或暂停，先完整地停止
         if (currentState == TtsPlaybackState.PLAYING || currentState == TtsPlaybackState.PAUSED) {
             synthesisJob?.cancelAndJoin()
             synthesisJob = null
             audioPlayer.stopAndRelease()
         }
-        // 如果是从 IDLE 状态过来，AudioPlayer 是好的，可以复用，不需要 stopAndRelease
 
         sentences.clear()
         sentences.addAll(SentenceSplitter.splitWithDelimiters(text))
@@ -193,11 +194,7 @@ class TtsSynthesizer(
         playingSentenceIndex = 0
         synthesisSentenceIndex = 0
         audioPlayer.configureBuffering(prerollMs = 300, lowWatermarkMs = 120, highWatermarkMs = 350, autoRebuffer = true)
-
-        // startIfNeeded 会正确处理：如果 player 已存在且 active (IDLE 状态)，它什么都不做；
-        // 如果 player 被 stopAndRelease 了，它会创建一个新的。
         audioPlayer.startIfNeeded(volume = currentVolume)
-
         updateState(TtsPlaybackState.PLAYING)
         currentCallback?.onSynthesisStart()
         startSynthesis()
@@ -228,23 +225,27 @@ class TtsSynthesizer(
     }
 
     private fun handlePause() {
-        if (currentState != TtsPlaybackState.PLAYING) return
+        if (currentState != TtsPlaybackState.PLAYING) {
+            Log.w(TAG, "Cannot pause, current state is $currentState, not PLAYING.")
+            return
+        }
         audioPlayer.pause()
         updateState(TtsPlaybackState.PAUSED)
         currentCallback?.onPaused()
     }
 
     private fun handleResume() {
-        if (currentState != TtsPlaybackState.PAUSED) return
+        if (currentState != TtsPlaybackState.PAUSED) {
+            Log.w(TAG, "Cannot resume, current state is $currentState, not PAUSED.")
+            return
+        }
         audioPlayer.resume()
         updateState(TtsPlaybackState.PLAYING)
         currentCallback?.onResumed()
     }
 
-    // [修改点] handleStop 现在是纯粹的中断操作
     private fun handleStop() {
-        if (currentState == TtsPlaybackState.IDLE) return // 如果已经是 IDLE，什么都不做
-
+        if (currentState == TtsPlaybackState.IDLE) return
         synthesisJob?.cancel()
         synthesisJob = null
         audioPlayer.stopAndRelease()
@@ -288,6 +289,7 @@ class TtsSynthesizer(
                 }
                 sendCommand(Command.InternalSynthesisFinished)
             } catch (e: CancellationException) {
+                // Job被取消是正常操作
             } catch (t: Throwable) {
                 sendCommand(Command.InternalError("合成失败: ${t.message}"))
             }
@@ -310,6 +312,7 @@ class TtsSynthesizer(
                         pcmArray, TtsConstants.PCM_BUFFER_SIZE, synthResult, 1
                     ) ?: -1
                     if (synthesisStatus == -1) {
+                        Log.e(TAG, "Synthesis error for sentence: $sentence")
                         nativeEngine?.reset()
                         return@withLock false
                     }
@@ -364,6 +367,12 @@ class TtsSynthesizer(
         if (currentState != newState) {
             currentState = newState
             currentCallback?.onStateChanged(newState)
+
+            // 更新暴露给UI的 StateFlow
+            // PLAYING 状态是明确的“正在播放”
+            // PAUSED 状态也属于一个“播放会话”中，所以UI上通常也显示为播放状态（例如显示暂停图标）
+            // IDLE 状态是明确的“已停止”
+            _isPlaying.value = (newState == TtsPlaybackState.PLAYING || newState == TtsPlaybackState.PAUSED)
         }
     }
 }

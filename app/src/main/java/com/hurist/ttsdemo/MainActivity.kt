@@ -20,6 +20,8 @@ import com.qq.wx.offlinevoice.synthesizer.TtsCallback
 import com.qq.wx.offlinevoice.synthesizer.TtsPlaybackState
 import com.qq.wx.offlinevoice.synthesizer.TtsSynthesizer
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -161,6 +163,9 @@ class MainActivity : AppCompatActivity() {
      */
     private fun initTts() {
         tts = TtsSynthesizer(this, currentVoice)
+        tts!!.isPlaying.onEach {
+            buttonPause.text = if (it) "暂停" else "继续"
+        }.launchIn(lifecycleScope)
         
         // 设置回调以监听TTS事件
         val callback = object : TtsCallback {
@@ -199,15 +204,12 @@ class MainActivity : AppCompatActivity() {
                     when (newState) {
                         TtsPlaybackState.IDLE -> {
                             updateStatus("空闲")
-                            buttonPause.text = "暂停"
                         }
                         TtsPlaybackState.PLAYING -> {
                             updateStatus("播放中")
-                            buttonPause.text = "暂停"
                         }
                         TtsPlaybackState.PAUSED -> {
                             updateStatus("已暂停")
-                            buttonPause.text = "继续"
                         }
                     }
                 }
