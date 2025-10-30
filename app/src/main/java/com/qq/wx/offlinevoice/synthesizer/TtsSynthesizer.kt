@@ -333,6 +333,7 @@ class TtsSynthesizer(
                     audioPlayer.enqueueMarker { sendCommand(Command.InternalSentenceStart(index, sentence)) }
                 }
                 audioPlayer.enqueueMarker { sendCommand(Command.InternalSentenceEnd(index, sentence)) }
+                Log.d(TAG, "Finished synthesizing sentence index $index: $sentence")
                 true
             } catch (e: CancellationException) {
                 false
