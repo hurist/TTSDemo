@@ -42,7 +42,6 @@ class TtsSynthesizer(
     private var shouldStop = false
 
     private val audioPlayer: AudioPlayer = AudioPlayer(TtsConstants.DEFAULT_SAMPLE_RATE)
-    private val pcmProcessor: PcmProcessor = PcmProcessor()
 
     companion object {
         private const val TAG = "TtsSynthesizer"
@@ -318,7 +317,7 @@ class TtsSynthesizer(
                     return false
                 }
 
-                pcmProcessor.initialize(speed = currentSpeed)
+                //pcmProcessor.initialize(speed = currentSpeed)
 
                 val synthResult = IntArray(1)
                 val pcmArray = pcmBuffer.array()
@@ -347,15 +346,9 @@ class TtsSynthesizer(
                     }
 
                     val validPcm = pcmArray.copyOf(validSamples)
-                    val processedPcm = pcmProcessor.process(validPcm)
-                    if (processedPcm.isNotEmpty()) {
-                        audioPlayer.enqueuePcm(processedPcm)
+                    if (validPcm.isNotEmpty()) {
+                        audioPlayer.enqueuePcm(validPcm)
                     }
-                }
-
-                val flushed = pcmProcessor.flush()
-                if (flushed.isNotEmpty()) {
-                    audioPlayer.enqueuePcm(flushed)
                 }
 
                 if (shouldStop) return false
@@ -413,7 +406,7 @@ class TtsSynthesizer(
             }
 
             audioPlayer.stopAndRelease()
-            pcmProcessor.release()
+            //pcmProcessor.release()
             currentState = TtsPlaybackState.IDLE
         }
     }
