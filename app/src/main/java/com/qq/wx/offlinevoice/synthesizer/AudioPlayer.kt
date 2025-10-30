@@ -12,6 +12,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -20,11 +21,9 @@ import kotlinx.coroutines.selects.select
 
 /**
  * 基于“播放协程 + Channel 队列”的音频播放器 (最终健壮版)
- * - [新增] resetBlocking 方法，使用 CompletableDeferred 实现同步重置，确保调用者能等待重置完成。
- * - 软重置时销毁并重建 AudioTrack，彻底清空硬件缓冲区，实现真正的“立即停止”。
- * - 使用 AudioTrack.write 非阻塞模式，确保播放协程高响应性。
- * - 简化并集中化软重置逻辑，在 controlChannel 接收时原子化处理。
- * - 引入 generation：软重启后自动丢弃旧代的 PCM/Marker。
+ *
+ * [最终修复] 新增 stopAndReleaseBlocking() 方法，使用 cancelAndJoin 实现同步停止，
+ * 确保调用者可以等待播放器完全释放资源后再继续执行。
  */
 class AudioPlayer(
     private val sampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE,
@@ -61,7 +60,7 @@ class AudioPlayer(
 
     private data class Control(
         val resetPrerollMs: Int? = null,
-        val ack: CompletableDeferred<Unit>? = null // 用于应答的 Deferred
+        val ack: CompletableDeferred<Unit>? = null
     )
 
     private val scope = CoroutineScope(Dispatchers.Default + Job())
@@ -70,18 +69,15 @@ class AudioPlayer(
 
     @Volatile private var audioTrack: AudioTrack? = null
     private var playbackJob: Job? = null
-
     @Volatile private var isPaused = false
     @Volatile private var isStopped = true
     @Volatile private var currentVolume: Float = 1.0f
-
     @Volatile private var prerollSamples: Int = msToSamples(250)
     @Volatile private var lowWatermarkSamples: Int = msToSamples(120)
     @Volatile private var highWatermarkSamples: Int = msToSamples(300)
     @Volatile private var autoRebufferEnabled: Boolean = true
     private val bufferedSamples = AtomicLong(0)
     @Volatile private var waitingForPreroll = true
-
     @Volatile private var generation: Long = 0L
 
     companion object {
@@ -104,10 +100,7 @@ class AudioPlayer(
 
     fun startIfNeeded(volume: Float = 1.0f) {
         currentVolume = volume.coerceIn(0f, 1f)
-        if (playbackJob?.isActive == true) {
-            Log.d(TAG, "AudioPlayer already started.")
-            return
-        }
+        if (playbackJob?.isActive == true) return
 
         bufferedSamples.set(0)
         waitingForPreroll = true
@@ -134,7 +127,6 @@ class AudioPlayer(
                         controlChannel.onReceive { control ->
                             Log.d(TAG, "Control message received. Applying soft reset. Gen bump to ${generation + 1}")
                             generation++
-
                             recreateAudioTrack()
 
                             var drainedSamples = 0L
@@ -149,7 +141,6 @@ class AudioPlayer(
                             isPaused = false
                             control.resetPrerollMs?.let { prerollSamples = msToSamples(it) }
 
-                            // 在所有重置操作完成后，发出完成信号
                             control.ack?.complete(Unit)
                         }
 
@@ -221,6 +212,8 @@ class AudioPlayer(
         audioTrack = null
     }
 
+
+
     private fun recreateAudioTrack() {
         releaseAudioTrack()
         audioTrack = createAudioTrack()
@@ -230,21 +223,12 @@ class AudioPlayer(
         }
     }
 
-    /**
-     * 发送重置命令并等待播放器确认重置完成。
-     * 这确保了调用者可以同步地知道播放器已经处于干净状态。
-     */
     suspend fun resetBlocking(prerollMs: Int? = null) {
         if (isStopped || playbackJob?.isActive != true) return
         val ack = CompletableDeferred<Unit>()
         controlChannel.send(Control(prerollMs, ack))
         ack.await()
         Log.d(TAG, "Reset acknowledged by AudioPlayer.")
-    }
-
-    suspend fun softReset(prerollMs: Int? = null) {
-        if (isStopped || playbackJob?.isActive != true) return
-        controlChannel.send(Control(prerollMs, null))
     }
 
     suspend fun enqueuePcm(pcm: ShortArray, offset: Int = 0, length: Int = pcm.size) {
@@ -286,15 +270,42 @@ class AudioPlayer(
         }
     }
 
+    /**
+     * [修改点] 非挂起版本，仅发出取消请求，立即返回（“发射后不管”）。
+     */
     fun stopAndRelease() {
+        if (isStopped) return
         isStopped = true
         isPaused = false
         playbackJob?.cancel()
+        playbackJob = null // 立即置空
+        pcmChannel.close()
+        controlChannel.close()
+        bufferedSamples.set(0)
+        Log.d(TAG, "AudioPlayer stopAndRelease (fire-and-forget) called.")
+    }
+
+    /**
+     * [新增] 挂起版本，会取消并等待播放任务完全终止。
+     * 这是确保资源被彻底释放的同步方法。
+     */
+    suspend fun stopAndReleaseBlocking() {
+        if (isStopped) return
+        val jobToJoin = playbackJob
+
+        isStopped = true
+        isPaused = false
+
+        // 取消任务。任务的 finally 块会负责释放 AudioTrack。
+        // cancelAndJoin 是关键，它会等待协程完全结束。
+        jobToJoin?.cancelAndJoin()
+
+        // 确认任务死亡后，我们可以安全地清理其他资源。
         playbackJob = null
         pcmChannel.close()
         controlChannel.close()
         bufferedSamples.set(0)
-        Log.d(TAG, "Audio stopped and released")
+        Log.d(TAG, "AudioPlayer stopped and released synchronously.")
     }
 
     private suspend fun maybeStartAfterPreroll() {

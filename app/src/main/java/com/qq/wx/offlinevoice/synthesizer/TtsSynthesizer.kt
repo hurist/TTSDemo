@@ -23,8 +23,8 @@ import kotlinx.coroutines.sync.withLock
 /**
  * 文本转语音合成器（命令处理器架构）
  *
- * [新增] 暴露 isPlaying: StateFlow<Boolean> 给UI层，用于响应式状态更新。
- * [修改点] 强化了 pause/resume 的状态检查，使其更加健壮。
+ * [最终修复] 通过在 handleStop 中同步停止合成和播放任务，解决了在播放中调用 speak 导致的卡顿问题。
+ * 这确保了在启动新会话前，旧会话的资源已被完全释放。
  */
 class TtsSynthesizer(
     context: Context,
@@ -58,7 +58,6 @@ class TtsSynthesizer(
     private var currentVoice: String = voiceName
     private var currentCallback: TtsCallback? = null
 
-    // [新增] 用于向UI层暴露状态的 StateFlow
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
 
@@ -178,12 +177,15 @@ class TtsSynthesizer(
         }
     }
 
+    /**
+     * [修改点] handleSpeak 现在依赖于同步的 handleStop 来确保在启动前系统是干净的。
+     */
     private suspend fun handleSpeak(text: String) {
+        // 如果当前正在播放或暂停，先执行一次完整的、同步的停止操作。
         if (currentState == TtsPlaybackState.PLAYING || currentState == TtsPlaybackState.PAUSED) {
-            synthesisJob?.cancelAndJoin()
-            synthesisJob = null
-            audioPlayer.stopAndRelease()
+            handleStop()
         }
+        // 当 handleStop 返回时，我们能确保系统已处于一个干净的 IDLE 状态。
 
         sentences.clear()
         sentences.addAll(SentenceSplitter.splitWithDelimiters(text))
@@ -194,7 +196,10 @@ class TtsSynthesizer(
         playingSentenceIndex = 0
         synthesisSentenceIndex = 0
         audioPlayer.configureBuffering(prerollMs = 300, lowWatermarkMs = 120, highWatermarkMs = 350, autoRebuffer = true)
+
+        // startIfNeeded 现在可以安全地创建一个新的播放器会话。
         audioPlayer.startIfNeeded(volume = currentVolume)
+
         updateState(TtsPlaybackState.PLAYING)
         currentCallback?.onSynthesisStart()
         startSynthesis()
@@ -244,17 +249,25 @@ class TtsSynthesizer(
         currentCallback?.onResumed()
     }
 
-    private fun handleStop() {
+    /**
+     * [修改点] handleStop 现在是一个挂起函数，它会同步地停止并等待所有相关任务结束。
+     */
+    private suspend fun handleStop() {
         if (currentState == TtsPlaybackState.IDLE) return
-        synthesisJob?.cancel()
+
+        // 等待合成任务完全死亡。
+        synthesisJob?.cancelAndJoin()
         synthesisJob = null
-        audioPlayer.stopAndRelease()
+
+        // 等待播放器任务完全死亡并释放资源。
+        audioPlayer.stopAndReleaseBlocking()
+
         sentences.clear()
         updateState(TtsPlaybackState.IDLE)
     }
 
-    private fun handleRelease() {
-        handleStop()
+    private suspend fun handleRelease() {
+        handleStop() // handleStop 现在是同步的，所以这里是安全的。
         commandChannel.close()
         if (instanceCount.decrementAndGet() == 0) {
             nativeEngine?.destroy()
@@ -312,7 +325,6 @@ class TtsSynthesizer(
                         pcmArray, TtsConstants.PCM_BUFFER_SIZE, synthResult, 1
                     ) ?: -1
                     if (synthesisStatus == -1) {
-                        Log.e(TAG, "Synthesis error for sentence: $sentence")
                         nativeEngine?.reset()
                         return@withLock false
                     }
@@ -333,7 +345,6 @@ class TtsSynthesizer(
                     audioPlayer.enqueueMarker { sendCommand(Command.InternalSentenceStart(index, sentence)) }
                 }
                 audioPlayer.enqueueMarker { sendCommand(Command.InternalSentenceEnd(index, sentence)) }
-                Log.d(TAG, "Finished synthesizing sentence index $index: $sentence")
                 true
             } catch (e: CancellationException) {
                 false
@@ -368,12 +379,7 @@ class TtsSynthesizer(
         if (currentState != newState) {
             currentState = newState
             currentCallback?.onStateChanged(newState)
-
-            // 更新暴露给UI的 StateFlow
-            // PLAYING 状态是明确的“正在播放”
-            // PAUSED 状态也属于一个“播放会话”中，所以UI上通常也显示为播放状态（例如显示暂停图标）
-            // IDLE 状态是明确的“已停止”
-            _isPlaying.value = (newState == TtsPlaybackState.PLAYING || newState == TtsPlaybackState.PAUSED)
+            _isPlaying.value = newState == TtsPlaybackState.PLAYING
         }
     }
 }
