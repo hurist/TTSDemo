@@ -2,7 +2,6 @@ package com.qq.wx.offlinevoice.synthesizer
 
 import android.content.Context
 import android.os.Process
-import android.util.Log
 import java.nio.ShortBuffer
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantLock
@@ -19,9 +18,9 @@ import kotlinx.coroutines.sync.withLock
 
 /**
  * 文本转语音合成器（播放协程 + 队列）
- * - 配置 AudioPlayer 的预缓冲与自动回填策略
- * - 合成协程提升优先级，尽量跟上播放
- * - 播放进度以播放协程为准（通过播放队列 Marker 触发 onSentenceStart/onSentenceComplete）
+ * - 播放中修改 speed/voice：软重启，立刻丢弃旧音频并从当前句句首用新配置继续
+ * - 非播放（IDLE/PAUSED）仅更新配置
+ * - 进度以播放协程为准（句首/句末 Marker）
  */
 class TtsSynthesizer(
     context: Context,
@@ -32,8 +31,7 @@ class TtsSynthesizer(
     private val voiceDataPath: String
     private val pcmBuffer: ShortBuffer = ShortBuffer.allocate(TtsConstants.PCM_BUFFER_SIZE)
 
-    @Volatile
-    private var currentState: TtsPlaybackState = TtsPlaybackState.IDLE
+    @Volatile private var currentState: TtsPlaybackState = TtsPlaybackState.IDLE
 
     private val sentences = mutableListOf<String>()
     @Volatile private var playbackSentenceIndex: Int = 0
@@ -54,7 +52,6 @@ class TtsSynthesizer(
     private val audioPlayer: AudioPlayer = AudioPlayer(TtsConstants.DEFAULT_SAMPLE_RATE)
 
     companion object {
-        private const val TAG = "TtsSynthesizer"
         private val instanceCount = AtomicInteger(0)
         @Volatile private var nativeEngine: SynthesizerNative? = null
         @Volatile private var currentVoiceCode: String? = null
@@ -63,9 +60,7 @@ class TtsSynthesizer(
             try {
                 System.loadLibrary("hwTTS")
                 System.loadLibrary("weread-tts")
-            } catch (e: UnsatisfiedLinkError) {
-                Log.e(TAG, "加载原生库失败", e)
-            }
+            } catch (_: UnsatisfiedLinkError) { }
         }
     }
 
@@ -86,19 +81,12 @@ class TtsSynthesizer(
 
     fun initialize() {
         stateLock.withLock {
-            try {
-                if (instanceCount.incrementAndGet() == 1) {
-                    nativeEngine = SynthesizerNative()
-                    nativeEngine?.init(voiceDataPath.toByteArray())
-                    Log.d(TAG, "原生TTS引擎初始化完成，路径: $voiceDataPath")
-                }
-                currentState = TtsPlaybackState.IDLE
-                currentCallback?.onInitialized(true)
-            } catch (e: Exception) {
-                Log.e(TAG, "TTS引擎初始化失败", e)
-                currentCallback?.onInitialized(false)
-                currentCallback?.onError("初始化失败: ${e.message}")
+            if (instanceCount.incrementAndGet() == 1) {
+                nativeEngine = SynthesizerNative()
+                nativeEngine?.init(voiceDataPath.toByteArray())
             }
+            currentState = TtsPlaybackState.IDLE
+            currentCallback?.onInitialized(true)
         }
     }
 
@@ -112,7 +100,7 @@ class TtsSynthesizer(
             if (currentSpeed != newSpeed) {
                 currentSpeed = newSpeed
                 if (currentState == TtsPlaybackState.PLAYING) {
-                    restartCurrentSentence()
+                    softRestartFromCurrentSentence()
                 }
             }
         }
@@ -133,28 +121,37 @@ class TtsSynthesizer(
             if (currentVoice != voiceName) {
                 currentVoice = voiceName
                 if (currentState == TtsPlaybackState.PLAYING) {
-                    restartCurrentSentence()
+                    softRestartFromCurrentSentence()
                 }
             }
         }
     }
 
-    private fun restartCurrentSentence() {
-        stateLock.withLock {
-            stopSynthesisJobBlocking()
-            audioPlayer.stopAndRelease()
-            synthesisSentenceIndex = playbackSentenceIndex
-            playingSentenceIndex = playbackSentenceIndex
+    /**
+     * 软重启：立刻丢弃旧音频并从“正在播放的句子”的句首用新配置继续
+     */
+    private fun softRestartFromCurrentSentence() {
+        val fromIndex = stateLock.withLock { playingSentenceIndex.coerceIn(0, sentences.size) }
 
-            audioPlayer.configureBuffering(
-                prerollMs = 300,
-                lowWatermarkMs = 120,
-                highWatermarkMs = 350,
-                autoRebuffer = true
-            )
-            audioPlayer.startIfNeeded(volume = currentVolume)
-            startSynthesisCoroutine()
+        // 1) 取消当前合成协程
+        stopSynthesisJobBlocking()
+
+        // 2) 软清空播放器（优先处理、立刻 flush 内部缓冲）
+        scope.launch(Dispatchers.Default) {
+            audioPlayer.softReset(prerollMs = 220)
         }
+
+        // 3) 重置合成游标
+        stateLock.withLock {
+            synthesisSentenceIndex = fromIndex
+            // playingSentenceIndex 会在新句子“句首 Marker”里重新设置为 fromIndex
+        }
+
+        // 4) 确保播放器活跃
+        audioPlayer.startIfNeeded(volume = stateLock.withLock { currentVolume })
+
+        // 5) 继续合成并入队（不改变外部状态，不重复 onSynthesisStart）
+        startSynthesisCoroutine()
     }
 
     fun speak(text: String) {
@@ -213,10 +210,8 @@ class TtsSynthesizer(
 
     private fun stopInternal() {
         if (currentState == TtsPlaybackState.IDLE) return
-
         stopSynthesisJobBlocking()
         audioPlayer.stopAndRelease()
-
         sentences.clear()
         playbackSentenceIndex = 0
         playingSentenceIndex = 0
@@ -226,19 +221,15 @@ class TtsSynthesizer(
 
     private fun startSynthesisCoroutine() {
         synthesisJob = scope.launch(Dispatchers.Default) {
-            // 提升当前工作线程优先级（尽力而为，协程可能迁移线程）
             runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_MORE_FAVORABLE) }
-
             try {
                 while (isActive && synthesisSentenceIndex < sentences.size) {
                     val index = synthesisSentenceIndex
                     val sentence = sentences[index]
 
-                    // 合成并入队：在第一个 PCM 块之前先入队“句首 Marker”，以播放协程为准触发开始回调
                     val ok = synthesizeSentenceAndEnqueue(index, sentence)
                     if (!ok || !isActive) break
 
-                    // 句末标记：真正播放完毕后推进索引与完成回调
                     audioPlayer.enqueueMarker {
                         stateLock.withLock {
                             playbackSentenceIndex = index + 1
@@ -252,8 +243,7 @@ class TtsSynthesizer(
 
                     synthesisSentenceIndex++
                 }
-            } catch (ce: CancellationException) {
-                // 正常取消
+            } catch (_: CancellationException) {
             } catch (t: Throwable) {
                 currentCallback?.onError("Speech execution error: ${t.message}")
                 stateLock.withLock { updateState(TtsPlaybackState.IDLE) }
@@ -268,12 +258,15 @@ class TtsSynthesizer(
 
     /**
      * 合成一个句子并将 PCM 按块入队。
-     * 注意：第一个 PCM 块入队前会先入队“句首 Marker”，确保 onSentenceStart 在播放协程触发。
+     * 第一个块之前入队“句首 Marker”，确保 onSentenceStart 在播放协程触发。
      */
     private suspend fun synthesizeSentenceAndEnqueue(index: Int, sentence: String): Boolean {
         return engineMutex.withLock {
             try {
-                val prepareResult = prepareForSynthesis(sentence, currentSpeed, currentVolume)
+                val speed = stateLock.withLock { currentSpeed }
+                val volume = stateLock.withLock { currentVolume }
+
+                val prepareResult = prepareForSynthesis(sentence, speed, volume)
                 if (prepareResult != 0) {
                     currentCallback?.onError("准备句子失败: $sentence")
                     return@withLock false
@@ -317,8 +310,7 @@ class TtsSynthesizer(
                         audioPlayer.enqueuePcm(validPcm)
                     }
 
-                    // 让出调度，避免长循环饿死其他协程
-                    //if (!isActive) break
+                    // 让出调度
                     delay(0)
                 }
 
@@ -332,7 +324,7 @@ class TtsSynthesizer(
                 }
 
                 true
-            } catch (ce: CancellationException) {
+            } catch (_: CancellationException) {
                 false
             } catch (e: Exception) {
                 currentCallback?.onError("合成错误: ${e.message}")
@@ -387,7 +379,6 @@ class TtsSynthesizer(
     fun release() {
         stateLock.withLock {
             stopInternal()
-
             if (instanceCount.decrementAndGet() == 0) {
                 nativeEngine?.destroy()
                 nativeEngine = null

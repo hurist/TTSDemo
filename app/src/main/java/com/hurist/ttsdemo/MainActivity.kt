@@ -183,7 +183,7 @@ class MainActivity : AppCompatActivity() {
             override fun onSentenceStart(sentenceIndex: Int, sentence: String, totalSentences: Int) {
                 Log.d(TAG, "开始播放第 $sentenceIndex 句，共 $totalSentences 句")
                 runOnUiThread {
-                    updateStatus("播放中: ${sentenceIndex + 1}/$totalSentences")
+                    updateStatus("播放中: ${sentenceIndex + 1}/$totalSentences, 当前句: $sentence")
                 }
             }
 
@@ -216,6 +216,11 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread {
                     updateStatus("播放完成")
                 }
+                tts?.speak(
+                    """
+                    恭喜你完成了TTS演示应用的播放！
+                    """.trimIndent()
+                )
             }
 
             override fun onPaused() {
