@@ -104,7 +104,10 @@ class AudioPlayer(
 
     fun startIfNeeded(volume: Float = 1.0f) {
         currentVolume = volume.coerceIn(0f, 1f)
-        if (playbackJob?.isActive == true) return
+        if (playbackJob?.isActive == true) {
+            Log.d(TAG, "AudioPlayer already started.")
+            return
+        }
 
         bufferedSamples.set(0)
         waitingForPreroll = true

@@ -221,6 +221,8 @@ class MainActivity : AppCompatActivity() {
                 tts?.speak(
                     """
                     恭喜你完成了TTS演示应用的播放！
+                    你可以尝试输入不同的文本，调整语速，切换发音人，体验更多功能。
+                    感谢使用本应用，祝你有美好的一天！
                     """.trimIndent()
                 )
             }
