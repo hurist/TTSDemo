@@ -2,14 +2,15 @@ package com.qq.wx.offlinevoice.synthesizer
 
 import android.content.Context
 import android.os.Process
+import android.util.Log
 import java.nio.ShortBuffer
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -17,41 +18,58 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
 /**
- * 文本转语音合成器（播放协程 + 队列）
- * - 播放中修改 speed/voice：软重启，立刻丢弃旧音频并从当前句句首用新配置继续
- * - 非播放（IDLE/PAUSED）仅更新配置
- * - 进度以播放协程为准（句首/句末 Marker）
+ * 文本转语音合成器（命令处理器架构）
+ *
+ * [最终修复] softRestart 中使用 cancelAndJoin 和同步的 resetBlocking，
+ * 确保在重启合成前，旧的合成任务已死且播放器已完全清理干净，杜绝任何时序问题。
  */
 class TtsSynthesizer(
     context: Context,
     private val voiceName: String
 ) {
+    // --- 内部命令定义 ---
+    private sealed class Command {
+        data class Speak(val text: String) : Command()
+        data class SetSpeed(val speed: Float) : Command()
+        data class SetVolume(val volume: Float) : Command()
+        data class SetVoice(val voiceName: String) : Command()
+        data class SetCallback(val callback: TtsCallback?) : Command()
+        object Pause : Command()
+        object Resume : Command()
+        object Stop : Command()
+        object Release : Command()
+
+        // 来自 AudioPlayer 或合成协程的回调生成的内部消息
+        data class InternalSentenceStart(val index: Int, val sentence: String) : Command()
+        data class InternalSentenceEnd(val index: Int, val sentence: String) : Command()
+        object InternalSynthesisFinished : Command() // 合成协程正常结束
+        data class InternalError(val message: String) : Command() // 任何地方发生的错误
+    }
+
+    // --- 状态变量 (仅由命令处理器协程访问) ---
+    private var currentState: TtsPlaybackState = TtsPlaybackState.IDLE
+    private val sentences = mutableListOf<String>()
+    private var playingSentenceIndex: Int = 0
+    private var synthesisSentenceIndex: Int = 0
+    private var currentSpeed: Float = 1.0f
+    private var currentVolume: Float = 1.0f
+    private var currentVoice: String = voiceName
+    private var currentCallback: TtsCallback? = null
+    // --- 结束 ---
 
     private val voiceCode: String = voiceName
     private val voiceDataPath: String
     private val pcmBuffer: ShortBuffer = ShortBuffer.allocate(TtsConstants.PCM_BUFFER_SIZE)
 
-    @Volatile private var currentState: TtsPlaybackState = TtsPlaybackState.IDLE
-
-    private val sentences = mutableListOf<String>()
-    @Volatile private var playbackSentenceIndex: Int = 0
-    @Volatile private var playingSentenceIndex: Int = 0
-    @Volatile private var synthesisSentenceIndex: Int = 0
-
-    private var currentSpeed: Float = 1.0f
-    private var currentVolume: Float = 1.0f
-    private var currentVoice: String = voiceName
-    private var currentCallback: TtsCallback? = null
-
-    private val stateLock = ReentrantLock()
-    private val engineMutex = Mutex()
-
     private val scope = CoroutineScope(Dispatchers.Default + Job())
+    private val commandChannel = Channel<Command>(Channel.UNLIMITED)
     private var synthesisJob: Job? = null
 
     private val audioPlayer: AudioPlayer = AudioPlayer(TtsConstants.DEFAULT_SAMPLE_RATE)
+    private val engineMutex = Mutex() // 保护 Native 引擎的同步调用
 
     companion object {
+        private const val TAG = "TtsSynthesizer"
         private val instanceCount = AtomicInteger(0)
         @Volatile private var nativeEngine: SynthesizerNative? = null
         @Volatile private var currentVoiceCode: String? = null
@@ -77,257 +95,243 @@ class TtsSynthesizer(
             byteArrayOf(-72, 103, 115, -62, -33, 55, 22, -27),
             pathBuilder
         )
-    }
 
-    fun initialize() {
-        stateLock.withLock {
-            if (instanceCount.incrementAndGet() == 1) {
-                nativeEngine = SynthesizerNative()
-                nativeEngine?.init(voiceDataPath.toByteArray())
-            }
-            currentState = TtsPlaybackState.IDLE
-            currentCallback?.onInitialized(true)
-        }
-    }
-
-    fun setCallback(callback: TtsCallback?) {
-        currentCallback = callback
-    }
-
-    fun setSpeed(speed: Float) {
-        val newSpeed = speed.coerceIn(0.5f, 3.0f)
-        stateLock.withLock {
-            if (currentSpeed != newSpeed) {
-                currentSpeed = newSpeed
-                if (currentState == TtsPlaybackState.PLAYING) {
-                    softRestartFromCurrentSentence()
-                }
-            }
-        }
-    }
-
-    fun setVolume(volume: Float) {
-        val newVolume = volume.coerceIn(0.0f, 1.0f)
-        stateLock.withLock {
-            if (currentVolume != newVolume) {
-                currentVolume = newVolume
-                audioPlayer.setVolume(newVolume)
-            }
-        }
-    }
-
-    fun setVoice(voiceName: String) {
-        stateLock.withLock {
-            if (currentVoice != voiceName) {
-                currentVoice = voiceName
-                if (currentState == TtsPlaybackState.PLAYING) {
-                    softRestartFromCurrentSentence()
-                }
-            }
-        }
-    }
-
-    /**
-     * 软重启：立刻丢弃旧音频并从“正在播放的句子”的句首用新配置继续
-     */
-    private fun softRestartFromCurrentSentence() {
-        val fromIndex = stateLock.withLock { playingSentenceIndex.coerceIn(0, sentences.size) }
-
-        // 1) 取消当前合成协程
-        stopSynthesisJobBlocking()
-
-        // 2) 软清空播放器（优先处理、立刻 flush 内部缓冲）
-        scope.launch(Dispatchers.Default) {
-            audioPlayer.softReset(prerollMs = 220)
+        scope.launch {
+            commandProcessor()
         }
 
-        // 3) 重置合成游标
-        stateLock.withLock {
-            synthesisSentenceIndex = fromIndex
-            // playingSentenceIndex 会在新句子“句首 Marker”里重新设置为 fromIndex
+        if (instanceCount.incrementAndGet() == 1) {
+            nativeEngine = SynthesizerNative()
+            nativeEngine?.init(voiceDataPath.toByteArray())
         }
 
-        // 4) 确保播放器活跃
-        audioPlayer.startIfNeeded(volume = stateLock.withLock { currentVolume })
-
-        // 5) 继续合成并入队（不改变外部状态，不重复 onSynthesisStart）
-        startSynthesisCoroutine()
+        sendCommand(Command.SetCallback(null))
     }
 
+    fun setCallback(callback: TtsCallback?) = sendCommand(Command.SetCallback(callback))
+    fun setSpeed(speed: Float) = sendCommand(Command.SetSpeed(speed))
+    fun setVolume(volume: Float) = sendCommand(Command.SetVolume(volume))
+    fun setVoice(voiceName: String) = sendCommand(Command.SetVoice(voiceName))
     fun speak(text: String) {
-        stateLock.withLock {
-            if (currentState == TtsPlaybackState.PLAYING || currentState == TtsPlaybackState.PAUSED) {
-                stopInternal()
+        sendCommand(Command.Stop)
+        sendCommand(Command.Speak(text))
+    }
+    fun pause() = sendCommand(Command.Pause)
+    fun resume() = sendCommand(Command.Resume)
+    fun stop() = sendCommand(Command.Stop)
+    fun release() = sendCommand(Command.Release)
+    fun isSpeaking(): Boolean = currentState == TtsPlaybackState.PLAYING
+    fun getStatus(): TtsStatus {
+        val i = playingSentenceIndex.coerceAtMost(sentences.size - 1).coerceAtLeast(0)
+        val currentSentence = if (sentences.isNotEmpty() && i in sentences.indices) sentences[i] else ""
+        return TtsStatus(
+            state = currentState,
+            totalSentences = sentences.size,
+            currentSentenceIndex = playingSentenceIndex,
+            currentSentence = currentSentence
+        )
+    }
+
+    private fun sendCommand(command: Command) {
+        commandChannel.trySend(command)
+    }
+
+    private suspend fun commandProcessor() {
+        for (command in commandChannel) {
+            when (command) {
+                is Command.Speak -> handleSpeak(command.text)
+                is Command.SetSpeed -> handleSetSpeed(command.speed)
+                is Command.SetVolume -> handleSetVolume(command.volume)
+                is Command.SetVoice -> handleSetVoice(command.voiceName)
+                is Command.Pause -> handlePause()
+                is Command.Resume -> handleResume()
+                is Command.Stop -> handleStop()
+                is Command.Release -> {
+                    handleRelease()
+                    break
+                }
+                is Command.SetCallback -> {
+                    currentCallback = command.callback
+                    currentCallback?.onInitialized(true)
+                }
+                is Command.InternalSentenceStart -> {
+                    playingSentenceIndex = command.index
+                    currentCallback?.onSentenceStart(command.index, command.sentence, sentences.size)
+                }
+                is Command.InternalSentenceEnd -> {
+                    currentCallback?.onSentenceComplete(command.index, command.sentence)
+                    if (command.index == sentences.size - 1) {
+                        updateState(TtsPlaybackState.IDLE)
+                        currentCallback?.onSynthesisComplete()
+                    }
+                }
+                is Command.InternalSynthesisFinished -> { /* No action needed, completion is handled by InternalSentenceEnd */ }
+                is Command.InternalError -> {
+                    handleStop()
+                    currentCallback?.onError(command.message)
+                }
             }
-
-            sentences.clear()
-            sentences.addAll(SentenceSplitter.splitWithDelimiters(text))
-            if (sentences.isEmpty()) {
-                currentCallback?.onError("文本中没有有效的句子")
-                return
-            }
-
-            playbackSentenceIndex = 0
-            playingSentenceIndex = 0
-            synthesisSentenceIndex = 0
-
-            audioPlayer.configureBuffering(
-                prerollMs = 300,
-                lowWatermarkMs = 120,
-                highWatermarkMs = 350,
-                autoRebuffer = true
-            )
-            audioPlayer.startIfNeeded(volume = currentVolume)
-
-            updateState(TtsPlaybackState.PLAYING)
-            currentCallback?.onSynthesisStart()
-
-            startSynthesisCoroutine()
         }
     }
 
-    fun pause() {
-        stateLock.withLock {
-            if (currentState != TtsPlaybackState.PLAYING) return
-            audioPlayer.pause()
-            updateState(TtsPlaybackState.PAUSED)
-            currentCallback?.onPaused()
-        }
-    }
-
-    fun resume() {
-        stateLock.withLock {
-            if (currentState != TtsPlaybackState.PAUSED) return
-            updateState(TtsPlaybackState.PLAYING)
-            currentCallback?.onResumed()
-            audioPlayer.resume()
-        }
-    }
-
-    fun stop() {
-        stateLock.withLock { stopInternal() }
-    }
-
-    private fun stopInternal() {
-        if (currentState == TtsPlaybackState.IDLE) return
-        stopSynthesisJobBlocking()
-        audioPlayer.stopAndRelease()
+    private suspend fun handleSpeak(text: String) {
         sentences.clear()
-        playbackSentenceIndex = 0
+        sentences.addAll(SentenceSplitter.splitWithDelimiters(text))
+        if (sentences.isEmpty()) {
+            currentCallback?.onError("文本中没有有效的句子")
+            return
+        }
         playingSentenceIndex = 0
         synthesisSentenceIndex = 0
+        audioPlayer.configureBuffering(prerollMs = 300, lowWatermarkMs = 120, highWatermarkMs = 350, autoRebuffer = true)
+        audioPlayer.startIfNeeded(volume = currentVolume)
+        updateState(TtsPlaybackState.PLAYING)
+        currentCallback?.onSynthesisStart()
+        startSynthesis()
+    }
+
+    private suspend fun handleSetSpeed(speed: Float) {
+        val newSpeed = speed.coerceIn(0.5f, 3.0f)
+        if (currentSpeed == newSpeed) return
+        currentSpeed = newSpeed
+        if (currentState == TtsPlaybackState.PLAYING) {
+            softRestart()
+        }
+    }
+
+    private suspend fun handleSetVoice(voiceName: String) {
+        if (currentVoice == voiceName) return
+        currentVoice = voiceName
+        if (currentState == TtsPlaybackState.PLAYING) {
+            softRestart()
+        }
+    }
+
+    private fun handleSetVolume(volume: Float) {
+        val newVolume = volume.coerceIn(0.0f, 1.0f)
+        if (currentVolume == newVolume) return
+        currentVolume = newVolume
+        audioPlayer.setVolume(newVolume)
+    }
+
+    private fun handlePause() {
+        if (currentState != TtsPlaybackState.PLAYING) return
+        audioPlayer.pause()
+        updateState(TtsPlaybackState.PAUSED)
+        currentCallback?.onPaused()
+    }
+
+    private fun handleResume() {
+        if (currentState != TtsPlaybackState.PAUSED) return
+        audioPlayer.resume()
+        updateState(TtsPlaybackState.PLAYING)
+        currentCallback?.onResumed()
+    }
+
+    private fun handleStop() {
+        if (currentState == TtsPlaybackState.IDLE && sentences.isEmpty()) return
+        synthesisJob?.cancel()
+        synthesisJob = null
+        audioPlayer.stopAndRelease()
+        sentences.clear()
         updateState(TtsPlaybackState.IDLE)
     }
 
-    private fun startSynthesisCoroutine() {
+    private fun handleRelease() {
+        handleStop()
+        commandChannel.close()
+        if (instanceCount.decrementAndGet() == 0) {
+            nativeEngine?.destroy()
+            nativeEngine = null
+            currentVoiceCode = null
+        }
+    }
+
+    private suspend fun softRestart() {
+        Log.d(TAG, "Soft restart requested for sentence index: $playingSentenceIndex")
+        val restartIndex = playingSentenceIndex
+
+        // 1. 立即、无条件地取消正在运行的合成任务，并等待它完全停止。
+        synthesisJob?.cancelAndJoin()
+        synthesisJob = null
+        Log.d(TAG, "Synthesis job cancelled and joined.")
+
+        // 2. 调用阻塞式重置方法，等待 AudioPlayer 内部确认所有清理工作完成。
+        audioPlayer.resetBlocking(prerollMs = 220)
+        Log.d(TAG, "AudioPlayer has been reset synchronously.")
+
+        // 3. 此刻，系统处于绝对干净的状态，从正确的索引开始新的合成。
+        synthesisSentenceIndex = restartIndex
+        startSynthesis()
+        Log.d(TAG, "New synthesis started from index: $restartIndex")
+    }
+
+    private fun startSynthesis() {
         synthesisJob = scope.launch(Dispatchers.Default) {
-            runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_MORE_FAVORABLE) }
             try {
+                runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_MORE_FAVORABLE) }
                 while (isActive && synthesisSentenceIndex < sentences.size) {
                     val index = synthesisSentenceIndex
                     val sentence = sentences[index]
-
-                    val ok = synthesizeSentenceAndEnqueue(index, sentence)
+                    val ok = synthesizeAndEnqueue(index, sentence)
                     if (!ok || !isActive) break
-
-                    audioPlayer.enqueueMarker {
-                        stateLock.withLock {
-                            playbackSentenceIndex = index + 1
-                            currentCallback?.onSentenceComplete(index, sentence)
-                            if (playbackSentenceIndex >= sentences.size) {
-                                updateState(TtsPlaybackState.IDLE)
-                                currentCallback?.onSynthesisComplete()
-                            }
-                        }
-                    }
-
                     synthesisSentenceIndex++
                 }
-            } catch (_: CancellationException) {
+                sendCommand(Command.InternalSynthesisFinished)
+            } catch (e: CancellationException) {
+                // Job被取消是正常操作
             } catch (t: Throwable) {
-                currentCallback?.onError("Speech execution error: ${t.message}")
-                stateLock.withLock { updateState(TtsPlaybackState.IDLE) }
+                sendCommand(Command.InternalError("合成失败: ${t.message}"))
             }
         }
     }
 
-    private fun stopSynthesisJobBlocking() {
-        synthesisJob?.cancel()
-        synthesisJob = null
-    }
-
-    /**
-     * 合成一个句子并将 PCM 按块入队。
-     * 第一个块之前入队“句首 Marker”，确保 onSentenceStart 在播放协程触发。
-     */
-    private suspend fun synthesizeSentenceAndEnqueue(index: Int, sentence: String): Boolean {
+    private suspend fun synthesizeAndEnqueue(index: Int, sentence: String): Boolean {
         return engineMutex.withLock {
             try {
-                val speed = stateLock.withLock { currentSpeed }
-                val volume = stateLock.withLock { currentVolume }
-
-                val prepareResult = prepareForSynthesis(sentence, speed, volume)
+                val prepareResult = prepareForSynthesis(sentence, currentSpeed, currentVolume)
                 if (prepareResult != 0) {
-                    currentCallback?.onError("准备句子失败: $sentence")
+                    sendCommand(Command.InternalError("准备句子失败: $sentence"))
                     return@withLock false
                 }
 
                 val synthResult = IntArray(1)
                 val pcmArray = pcmBuffer.array()
-                var started = false
+                var hasEnqueuedStartMarker = false
 
                 while (synthesisJob?.isActive == true) {
                     val synthesisStatus = nativeEngine?.synthesize(
-                        pcmArray,
-                        TtsConstants.PCM_BUFFER_SIZE,
-                        synthResult,
-                        1
+                        pcmArray, TtsConstants.PCM_BUFFER_SIZE, synthResult, 1
                     ) ?: -1
-
                     if (synthesisStatus == -1) {
                         nativeEngine?.reset()
                         return@withLock false
                     }
-
                     val numSamples = synthResult[0]
                     if (numSamples <= 0) break
 
-                    val validSamples = minOf(pcmArray.size, numSamples)
-                    if (validSamples <= 0) break
-
-                    if (!started) {
-                        audioPlayer.enqueueMarker {
-                            stateLock.withLock {
-                                playingSentenceIndex = index
-                                currentCallback?.onSentenceStart(index, sentence, sentences.size)
-                            }
-                        }
-                        started = true
+                    if (!hasEnqueuedStartMarker) {
+                        audioPlayer.enqueueMarker { sendCommand(Command.InternalSentenceStart(index, sentence)) }
+                        hasEnqueuedStartMarker = true
                     }
-
-                    val validPcm = pcmArray.copyOf(validSamples)
-                    if (validPcm.isNotEmpty()) {
+                    val validSamples = minOf(pcmArray.size, numSamples)
+                    if (validSamples > 0) {
+                        val validPcm = pcmArray.copyOf(validSamples)
                         audioPlayer.enqueuePcm(validPcm)
                     }
-
-                    // 让出调度
-                    delay(0)
+                    delay(1)
                 }
 
-                if (!started) {
-                    audioPlayer.enqueueMarker {
-                        stateLock.withLock {
-                            playingSentenceIndex = index
-                            currentCallback?.onSentenceStart(index, sentence, sentences.size)
-                        }
-                    }
+                if (!hasEnqueuedStartMarker) {
+                    audioPlayer.enqueueMarker { sendCommand(Command.InternalSentenceStart(index, sentence)) }
                 }
 
+                audioPlayer.enqueueMarker { sendCommand(Command.InternalSentenceEnd(index, sentence)) }
                 true
-            } catch (_: CancellationException) {
+            } catch (e: CancellationException) {
                 false
             } catch (e: Exception) {
-                currentCallback?.onError("合成错误: ${e.message}")
+                sendCommand(Command.InternalError("合成错误: ${e.message}"))
                 false
             } finally {
                 nativeEngine?.reset()
@@ -343,7 +347,6 @@ class TtsSynthesizer(
             }
             nativeEngine?.setSpeed(speed)
             nativeEngine?.setVolume(volume)
-
             var prepareResult = -1
             for (attempt in 0 until TtsConstants.MAX_PREPARE_RETRIES) {
                 prepareResult = nativeEngine?.prepareUTF8(text.toByteArray()) ?: -1
@@ -358,32 +361,6 @@ class TtsSynthesizer(
         if (currentState != newState) {
             currentState = newState
             currentCallback?.onStateChanged(newState)
-        }
-    }
-
-    fun getStatus(): TtsStatus {
-        stateLock.withLock {
-            val i = playingSentenceIndex.coerceAtMost(sentences.size - 1).coerceAtLeast(0)
-            val currentSentence = if (sentences.isNotEmpty() && i in sentences.indices) sentences[i] else ""
-            return TtsStatus(
-                state = currentState,
-                totalSentences = sentences.size,
-                currentSentenceIndex = playingSentenceIndex,
-                currentSentence = currentSentence
-            )
-        }
-    }
-
-    fun isSpeaking(): Boolean = currentState == TtsPlaybackState.PLAYING
-
-    fun release() {
-        stateLock.withLock {
-            stopInternal()
-            if (instanceCount.decrementAndGet() == 0) {
-                nativeEngine?.destroy()
-                nativeEngine = null
-                currentVoiceCode = null
-            }
         }
     }
 }

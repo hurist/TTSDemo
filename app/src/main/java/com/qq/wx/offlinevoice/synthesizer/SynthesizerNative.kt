@@ -2,11 +2,6 @@ package com.qq.wx.offlinevoice.synthesizer
 
 class SynthesizerNative {
 
-    /*init {
-        System.loadLibrary("hwTTS")
-        System.loadLibrary("weread-tts")
-    }*/
-
     external fun destroy()
 
     external fun init(bArr: ByteArray?): Int

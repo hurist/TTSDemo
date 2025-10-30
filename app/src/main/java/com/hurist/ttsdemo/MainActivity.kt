@@ -104,15 +104,17 @@ class MainActivity : AppCompatActivity() {
         // SeekBar范围: 0-25，映射到0.5-3.0
         seekBarSpeed.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                val speed = 0.5f + (progress / 10f)  // 0.5 到 3.0
-                textViewSpeed.text = "语速: ${String.format("%.1f", speed)}x"
-                
-                // 动态修改语速
-                tts?.setSpeed(speed)
+
             }
             
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar) {
+                val speed = 0.5f + (seekBar.progress / 10f)  // 0.5 到 3.0
+                textViewSpeed.text = "语速: ${String.format("%.1f", speed)}x"
+
+                // 动态修改语速
+                tts?.setSpeed(speed)
+            }
         })
         
         // 设置发音人下拉框
@@ -240,7 +242,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         tts?.setCallback(callback)
-        tts?.initialize()
     }
     
     /**
