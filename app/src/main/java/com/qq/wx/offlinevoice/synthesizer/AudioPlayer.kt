@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicLong
 /**
  * 基于“播放线程 + 队列”的音频播放器
  * - 新增：预缓冲(preroll)与自动回填(auto-rebuffer)以避免低端机合成跟不上导致的卡顿
+ * - 保持不变：Marker 会在播放线程中按顺序执行，用于句首/句末回调
  */
 class AudioPlayer(
     private val sampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE,

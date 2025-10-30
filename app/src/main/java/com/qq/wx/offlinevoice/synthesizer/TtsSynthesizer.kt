@@ -12,6 +12,7 @@ import kotlin.concurrent.withLock
  * 文本转语音合成器（播放线程 + 队列）
  * - 新增：配置 AudioPlayer 的预缓冲与自动回填策略
  * - 合成线程提升优先级，尽量跟上播放
+ * - 修复：播放进度以播放线程为准（通过播放队列 Marker 触发 onSentenceStart/onSentenceComplete）
  */
 class TtsSynthesizer(
     context: Context,
@@ -26,7 +27,11 @@ class TtsSynthesizer(
     private var currentState: TtsPlaybackState = TtsPlaybackState.IDLE
 
     private val sentences = mutableListOf<String>()
+    // 已播放完成到第几个句子（在“句末 Marker”里推进）
     @Volatile private var playbackSentenceIndex: Int = 0
+    // 正在播放的句子索引（在“句首 Marker”里设置）
+    @Volatile private var playingSentenceIndex: Int = 0
+    // 合成推进到第几个句子
     @Volatile private var synthesisSentenceIndex: Int = 0
 
     private var currentSpeed: Float = 1.0f
@@ -139,7 +144,9 @@ class TtsSynthesizer(
         stateLock.withLock {
             stopSynthesisThread()
             audioPlayer.stopAndRelease()
+            // 继续从已播放完成的位置（而非正在合成的位置）
             synthesisSentenceIndex = playbackSentenceIndex
+            playingSentenceIndex = playbackSentenceIndex
             shouldStop = false
             // 重新配置缓冲策略（可按需要调整阈值）
             audioPlayer.configureBuffering(
@@ -170,6 +177,7 @@ class TtsSynthesizer(
 
             Log.d(TAG, "文本分为 ${sentences.size} 句")
             playbackSentenceIndex = 0
+            playingSentenceIndex = 0
             synthesisSentenceIndex = 0
             shouldStop = false
 
@@ -229,6 +237,7 @@ class TtsSynthesizer(
 
         sentences.clear()
         playbackSentenceIndex = 0
+        playingSentenceIndex = 0
         synthesisSentenceIndex = 0
         updateState(TtsPlaybackState.IDLE)
     }
@@ -249,12 +258,13 @@ class TtsSynthesizer(
 
     fun getStatus(): TtsStatus {
         stateLock.withLock {
-            val i = playbackSentenceIndex.coerceAtMost(sentences.size - 1).coerceAtLeast(0)
+            val i = playingSentenceIndex.coerceAtMost(sentences.size - 1).coerceAtLeast(0)
             val currentSentence = if (sentences.isNotEmpty() && i in sentences.indices) sentences[i] else ""
             return TtsStatus(
                 state = currentState,
                 totalSentences = sentences.size,
-                currentSentenceIndex = playbackSentenceIndex,
+                // 返回“正在播放”的句子索引，而非“已完成”的索引
+                currentSentenceIndex = playingSentenceIndex,
                 currentSentence = currentSentence
             )
         }
@@ -274,10 +284,10 @@ class TtsSynthesizer(
                     val index = synthesisSentenceIndex
                     val sentence = sentences[index]
 
-                    currentCallback?.onSentenceStart(index, sentence, sentences.size)
                     Log.d(TAG, "开始合成句子 $index: $sentence")
 
-                    val ok = synthesizeSentenceAndEnqueue(sentence)
+                    // 合成并入队：在第一个 PCM 块之前先入队“句首 Marker”，以播放线程为准触发开始回调
+                    val ok = synthesizeSentenceAndEnqueue(index, sentence)
                     if (!ok || shouldStop) break
 
                     // 句末标记：真正播放完毕后推进索引与完成回调
@@ -287,8 +297,8 @@ class TtsSynthesizer(
                             currentCallback?.onSentenceComplete(index, sentence)
                             if (playbackSentenceIndex >= sentences.size && !shouldStop) {
                                 Log.d(TAG, "所有句子播放完成")
-                                currentCallback?.onSynthesisComplete()
                                 updateState(TtsPlaybackState.IDLE)
+                                currentCallback?.onSynthesisComplete()
                             }
                         }
                     }
@@ -307,7 +317,11 @@ class TtsSynthesizer(
         synthesisThread?.start()
     }
 
-    private fun synthesizeSentenceAndEnqueue(sentence: String): Boolean {
+    /**
+     * 合成一个句子并将 PCM 按块入队。
+     * 注意：第一个 PCM 块入队前会先入队“句首 Marker”，确保 onSentenceStart 在播放线程触发。
+     */
+    private fun synthesizeSentenceAndEnqueue(index: Int, sentence: String): Boolean {
         return synthesisLock.withLock {
             try {
                 val prepareResult = prepareForSynthesis(sentence, currentSpeed, currentVolume)
@@ -317,10 +331,10 @@ class TtsSynthesizer(
                     return false
                 }
 
-                //pcmProcessor.initialize(speed = currentSpeed)
-
                 val synthResult = IntArray(1)
                 val pcmArray = pcmBuffer.array()
+
+                var started = false
 
                 while (!shouldStop) {
                     val synthesisStatus = nativeEngine?.synthesize(
@@ -345,14 +359,35 @@ class TtsSynthesizer(
                         break
                     }
 
+                    // 在第一个块真正入队前，先插入“句首 Marker”，确保进度以播放为准
+                    if (!started) {
+                        audioPlayer.enqueueMarker {
+                            stateLock.withLock {
+                                playingSentenceIndex = index
+                                currentCallback?.onSentenceStart(index, sentence, sentences.size)
+                            }
+                        }
+                        started = true
+                    }
+
                     val validPcm = pcmArray.copyOf(validSamples)
                     if (validPcm.isNotEmpty()) {
                         audioPlayer.enqueuePcm(validPcm)
                     }
                 }
 
+                // 特殊情形：若该句没有产出任何 PCM（极端边界），仍需触发“句首 Marker”
+                if (!started) {
+                    audioPlayer.enqueueMarker {
+                        stateLock.withLock {
+                            playingSentenceIndex = index
+                            currentCallback?.onSentenceStart(index, sentence, sentences.size)
+                        }
+                    }
+                }
+
                 if (shouldStop) return false
-                Log.v(TAG, "句子合成完成并已入队")
+                Log.v(TAG, "句子合成完成并已入队（index=$index）")
                 return true
             } catch (ie: InterruptedException) {
                 Thread.currentThread().interrupt()
@@ -406,7 +441,6 @@ class TtsSynthesizer(
             }
 
             audioPlayer.stopAndRelease()
-            //pcmProcessor.release()
             currentState = TtsPlaybackState.IDLE
         }
     }
