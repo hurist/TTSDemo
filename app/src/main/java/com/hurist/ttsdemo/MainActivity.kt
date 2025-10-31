@@ -52,7 +52,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var textViewSpeed: TextView
 
     // 可用的发音人列表
-    private val availableVoices = listOf("dtn", "F191", "femaleen", "lsl", "maleen")
+    private val availableVoices = listOf("dtn", "F191", "F191_4", "femaleen", "femaleen_4", "lsl", "lsl_4", "maleen", "maleen_4")
     private var currentVoice = "lsl"
 
     companion object {
