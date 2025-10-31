@@ -30,6 +30,11 @@ class TtsSynthesizer(
     context: Context,
     private val voiceName: String
 ) {
+    private sealed class SynthesisResult {
+        object Success : SynthesisResult()
+        data class Failure(val reason: String) : SynthesisResult()
+    }
+
     private sealed class Command {
         data class Speak(val text: String) : Command()
         data class SetSpeed(val speed: Float) : Command()
@@ -68,6 +73,7 @@ class TtsSynthesizer(
     private var synthesisJob: Job? = null
     private val audioPlayer: AudioPlayer = AudioPlayer(initialSampleRate = TtsConstants.DEFAULT_SAMPLE_RATE)
     private val engineMutex = Mutex()
+    private var isPausedByError = false
 
     companion object {
         private const val TAG = "TtsSynthesizer"
@@ -139,16 +145,24 @@ class TtsSynthesizer(
                 is Command.InternalSentenceStart -> { playingSentenceIndex = command.index; currentCallback?.onSentenceStart(command.index, command.sentence, sentences.size) }
                 is Command.InternalSentenceEnd -> {
                     currentCallback?.onSentenceComplete(command.index, command.sentence)
-                    if (command.index == sentences.size - 1) { updateState(TtsPlaybackState.IDLE); currentCallback?.onSynthesisComplete() }
+                    if (command.index == sentences.size - 1 && !isPausedByError) {
+                        updateState(TtsPlaybackState.IDLE)
+                        currentCallback?.onSynthesisComplete()
+                    }
                 }
                 is Command.InternalSynthesisFinished -> { /* No-op */ }
-                is Command.InternalError -> { handleStop(); currentCallback?.onError(command.message) }
+                is Command.InternalError -> {
+                    Log.e(TAG, "收到严重内部错误，将执行 handleStop: ${command.message}")
+                    handleStop();
+                    currentCallback?.onError(command.message)
+                }
             }
         }
     }
 
     private suspend fun handleSpeak(text: String) {
         if (currentState == TtsPlaybackState.PLAYING || currentState == TtsPlaybackState.PAUSED) { handleStop() }
+        isPausedByError = false
         sentences.clear()
         sentences.addAll(SentenceSplitter.splitWithDelimiters(text))
         if (sentences.isEmpty()) { currentCallback?.onError("文本中没有有效的句子"); return }
@@ -160,201 +174,246 @@ class TtsSynthesizer(
         startSynthesis()
     }
 
-    private suspend fun handleSetSpeed(speed: Float) {
-        val newSpeed = speed.coerceIn(0.5f, 3.0f)
-        if (currentSpeed == newSpeed) return
-        currentSpeed = newSpeed
-        if (currentState == TtsPlaybackState.PLAYING) { softRestart() }
-    }
-
-    private suspend fun handleSetVoice(voiceName: String) {
-        if (currentVoice == voiceName) return
-        currentVoice = voiceName
-        if (currentState == TtsPlaybackState.PLAYING) { softRestart() }
-    }
-
-    private fun handleSetVolume(volume: Float) {
-        val newVolume = volume.coerceIn(0.0f, 1.0f)
-        if (currentVolume == newVolume) return
-        currentVolume = newVolume
-        audioPlayer.setVolume(newVolume)
-    }
+    private suspend fun handleSetSpeed(speed: Float) { val newSpeed = speed.coerceIn(0.5f, 3.0f); if (currentSpeed == newSpeed) return; currentSpeed = newSpeed; if (currentState == TtsPlaybackState.PLAYING) { softRestart() } }
+    private suspend fun handleSetVoice(voiceName: String) { if (currentVoice == voiceName) return; currentVoice = voiceName; if (currentState == TtsPlaybackState.PLAYING) { softRestart() } }
+    private fun handleSetVolume(volume: Float) { val newVolume = volume.coerceIn(0.0f, 1.0f); if (currentVolume == newVolume) return; currentVolume = newVolume; audioPlayer.setVolume(newVolume) }
 
     private fun handlePause() {
-        if (currentState != TtsPlaybackState.PLAYING) { Log.w(TAG, "无法暂停，当前状态为 $currentState, 而非 PLAYING。"); return }
+        if (currentState != TtsPlaybackState.PLAYING && currentState != TtsPlaybackState.PAUSED) {
+            Log.w(TAG, "无法暂停，当前状态为 $currentState")
+            return
+        }
+        if (currentState == TtsPlaybackState.PAUSED) {
+            Log.d(TAG, "已经是暂停状态，无需再次暂停。")
+            return
+        }
+        if (isPausedByError) {
+            Log.w(TAG, "因合成失败自动暂停。")
+        } else {
+            isPausedByError = false
+        }
         audioPlayer.pause()
         updateState(TtsPlaybackState.PAUSED)
         currentCallback?.onPaused()
     }
 
-    private fun handleResume() {
+    private suspend fun handleResume() {
         if (currentState != TtsPlaybackState.PAUSED) { Log.w(TAG, "无法恢复，当前状态为 $currentState, 而非 PAUSED。"); return }
-        audioPlayer.resume()
         updateState(TtsPlaybackState.PLAYING)
+        audioPlayer.resume()
         currentCallback?.onResumed()
+        if (isPausedByError) {
+            Log.i(TAG, "从错误暂停中恢复，正在重试合成...")
+            isPausedByError = false
+            synthesisJob?.cancelAndJoin()
+            startSynthesis()
+        }
     }
 
     private suspend fun handleStop() {
         if (currentState == TtsPlaybackState.IDLE) return
+        isPausedByError = false
         synthesisJob?.cancelAndJoin()
         synthesisJob = null
-        audioPlayer.stopAndReleaseBlocking()
+        audioPlayer.resetBlocking()
         sentences.clear()
         updateState(TtsPlaybackState.IDLE)
     }
 
-    private suspend fun handleRelease() {
-        handleStop()
-        commandChannel.close()
-        strategyManager.release()
-        if (instanceCount.decrementAndGet() == 0) {
-            nativeEngine?.destroy()
-            nativeEngine = null
-            currentVoiceCode = null
-        }
-    }
-
-    private suspend fun softRestart() {
-        Log.d(TAG, "软重启请求，句子索引: $playingSentenceIndex")
-        val restartIndex = playingSentenceIndex
-        synthesisJob?.cancelAndJoin()
-        synthesisJob = null
-        Log.d(TAG, "旧的合成任务已取消并等待结束。")
-        audioPlayer.resetBlocking()
-        Log.d(TAG, "播放器已同步重置。")
-        synthesisSentenceIndex = restartIndex
-        startSynthesis()
-        Log.d(TAG, "新的合成任务已从索引 $restartIndex 处启动。")
-    }
+    private suspend fun handleRelease() { handleStop(); commandChannel.close(); strategyManager.release(); if (instanceCount.decrementAndGet() == 0) { nativeEngine?.destroy(); nativeEngine = null; currentVoiceCode = null } }
+    private suspend fun softRestart() { Log.d(TAG, "软重启请求，句子索引: $playingSentenceIndex"); val restartIndex = playingSentenceIndex; synthesisJob?.cancelAndJoin(); synthesisJob = null; Log.d(TAG, "旧的合成任务已取消并等待结束。"); audioPlayer.resetBlocking(); Log.d(TAG, "播放器已同步重置。"); synthesisSentenceIndex = restartIndex; startSynthesis(); Log.d(TAG, "新的合成任务已从索引 $restartIndex 处启动。") }
 
     private fun startSynthesis() {
         synthesisJob = scope.launch(Dispatchers.Default) {
-            try {
-                runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_MORE_FAVORABLE) }
-                var activeMode = strategyManager.getDesiredMode()
-                Log.i(TAG, "合成循环启动。初始合成模式: $activeMode")
-                val modeWatcherJob = launch {
-                    strategyManager.isNetworkGood.collect { _ ->
-                        val desiredMode = strategyManager.getDesiredMode()
-                        if (activeMode != desiredMode && isActive) {
-                            if (activeMode == SynthesisMode.OFFLINE && desiredMode == SynthesisMode.ONLINE) {
-                                Log.i(TAG, "网络状况改善。主动升级至[在线模式]。正在重置播放队列...")
-                                audioPlayer.resetBlocking()
-                                activeMode = SynthesisMode.ONLINE
-                            } else if (activeMode == SynthesisMode.ONLINE && desiredMode == SynthesisMode.OFFLINE) {
-                                Log.w(TAG, "网络状况变差。主动降级至[离线模式]以合成后续句子。")
-                                activeMode = SynthesisMode.OFFLINE
+            val modeLock = Mutex()
+            val sessionStrategy = strategyManager.currentStrategy
+            var activeMode = strategyManager.getDesiredMode(sessionStrategy)
+            var synthesisLoopJob: Job? = null
+
+            fun launchSynthesisLoop() {
+                synthesisLoopJob?.cancel()
+                synthesisLoopJob = launch {
+                    var synthesisFailed = false
+                    try {
+                        while (coroutineContext.isActive && synthesisSentenceIndex < sentences.size) {
+                            val (index, currentMode) = modeLock.withLock { synthesisSentenceIndex to activeMode }
+                            val sentence = sentences[index]
+
+                            val result = when(currentMode) {
+                                SynthesisMode.ONLINE -> performOnlineSynthesis(index, sentence)
+                                SynthesisMode.OFFLINE -> performOfflineSynthesis(index, sentence)
+                            }
+
+                            when (result) {
+                                is SynthesisResult.Success -> {
+                                    modeLock.withLock { if (synthesisSentenceIndex == index) synthesisSentenceIndex++ }
+                                }
+                                is SynthesisResult.Failure -> {
+                                    Log.e(TAG, "句子 $index 合成失败 (模式: $currentMode, 策略: $sessionStrategy): ${result.reason}")
+                                    synthesisFailed = true
+                                    if (sessionStrategy == TtsStrategy.ONLINE_PREFERRED && currentMode == SynthesisMode.ONLINE) {
+                                        Log.w(TAG, "在线合成失败，回退至[离线模式]重试。")
+                                        modeLock.withLock { activeMode = SynthesisMode.OFFLINE }
+                                        val fallbackResult = performOfflineSynthesis(index, sentence)
+                                        if (fallbackResult is SynthesisResult.Success) {
+                                            modeLock.withLock { if (synthesisSentenceIndex == index) synthesisSentenceIndex++ }
+                                            synthesisFailed = false
+                                        } else {
+                                            val reason = (fallbackResult as? SynthesisResult.Failure)?.reason ?: "未知离线错误"
+                                            Log.e(TAG, "离线重试也失败了: $reason")
+                                            break
+                                        }
+                                    } else {
+                                        break
+                                    }
+                                }
+                            }
+                        }
+                    } catch (e: CancellationException) {
+                        Log.d(TAG, "合成循环被取消。")
+                    } finally {
+                        if (coroutineContext.isActive) {
+                            Log.i(TAG, "合成循环结束。向播放器发送流结束(EOS)标记。是否因失败而结束: $synthesisFailed")
+                            audioPlayer.enqueueEndOfStream {
+                                if (synthesisFailed) {
+                                    isPausedByError = true
+                                    sendCommand(Command.Pause)
+                                } else {
+                                    Log.i(TAG, "所有句子正常合成完毕，等待播放结束...")
+                                }
                             }
                         }
                     }
                 }
-                while (isActive && synthesisSentenceIndex < sentences.size) {
-                    val index = synthesisSentenceIndex
-                    val sentence = sentences[index]
-                    val success = if (activeMode == SynthesisMode.ONLINE) {
-                        val onlineSuccess = performOnlineSynthesis(index, sentence)
-                        if (!onlineSuccess) {
-                            Log.w(TAG, "在线合成句子 $index 失败。被动回退至[离线模式]。")
-                            activeMode = SynthesisMode.OFFLINE
-                            performOfflineSynthesis(index, sentence)
-                        } else {
-                            true
+            }
+
+            val modeWatcherJob = if (sessionStrategy == TtsStrategy.ONLINE_PREFERRED) {
+                launch {
+                    strategyManager.isNetworkGood.collect { _ ->
+                        modeLock.withLock {
+                            val desiredMode = strategyManager.getDesiredMode(sessionStrategy)
+                            if (activeMode != desiredMode && coroutineContext.isActive) {
+                                if (activeMode == SynthesisMode.OFFLINE && desiredMode == SynthesisMode.ONLINE) {
+                                    Log.i(TAG, "网络状况改善。主动升级至[在线模式]。")
+
+                                    val indexToPreserve = playingSentenceIndex
+                                    audioPlayer.resetQueueOnlyBlocking(preserveSentenceIndex = indexToPreserve)
+                                    Log.i(TAG, "播放队列已温柔重置，保留了正在播放的句子 $indexToPreserve 的数据。")
+
+                                    val nextSentenceIndex = playingSentenceIndex + 1
+                                    synthesisSentenceIndex = nextSentenceIndex
+                                    Log.i(TAG, "合成进度已同步，新索引: $nextSentenceIndex")
+                                    activeMode = SynthesisMode.ONLINE
+
+                                    Log.i(TAG, "重新启动合成循环以应用在线模式。")
+                                    launchSynthesisLoop()
+                                } else if (activeMode == SynthesisMode.ONLINE && desiredMode == SynthesisMode.OFFLINE) {
+                                    Log.w(TAG, "网络状况变差。主动降级至[离线模式]以合成后续句子。")
+                                    activeMode = SynthesisMode.OFFLINE
+                                }
+                            }
                         }
-                    } else {
-                        performOfflineSynthesis(index, sentence)
-                    }
-                    if (success) {
-                        synthesisSentenceIndex++
-                    } else {
-                        if (isActive) { sendCommand(Command.InternalError("句子合成失败: '$sentence' (模式: $activeMode)")) }
-                        break
                     }
                 }
-                modeWatcherJob.cancel()
-                if (isActive) { sendCommand(Command.InternalSynthesisFinished) }
-            } catch (e: CancellationException) {
-            } catch (t: Throwable) {
-                Log.e(TAG, "合成协程发生严重错误", t)
-                if (isActive) { sendCommand(Command.InternalError("合成协程发生未知错误: ${t.message}")) }
-            }
+            } else null
+
+            Log.i(TAG, "首次启动合成循环。")
+            launchSynthesisLoop()
         }
     }
 
-    private suspend fun performOnlineSynthesis(index: Int, sentence: String): Boolean {
+    private suspend fun performOnlineSynthesis(index: Int, sentence: String): SynthesisResult {
         try {
             Log.d(TAG, "正在合成[在线]句子 $index: \"$sentence\"")
             val mp3Data = onlineApi.fetchTtsAudio(sentence, currentVoice)
-            if (!coroutineContext.isActive) return false
-            if (mp3Data.isEmpty()) { Log.e(TAG, "在线API返回了空的音频数据: \"$sentence\""); return false }
-
+            if (!coroutineContext.isActive) return SynthesisResult.Failure("协程被取消")
+            if (mp3Data.isEmpty()) {
+                val reason = "在线API返回了空的音频数据"
+                Log.e(TAG, "$reason: \"$sentence\"")
+                return SynthesisResult.Failure(reason)
+            }
             val decodedResult = mp3Decoder.decode(mp3Data)
             val pcmData = decodedResult.pcmData
             val sampleRate = decodedResult.sampleRate
-            if (!coroutineContext.isActive) return false
+            if (!coroutineContext.isActive) return SynthesisResult.Failure("协程被取消")
+
+            val startCallback = { sendCommand(Command.InternalSentenceStart(index, sentence)) }
+            val endCallback = { sendCommand(Command.InternalSentenceEnd(index, sentence)) }
 
             if (pcmData.isEmpty()) {
                 Log.w(TAG, "MP3解码后得到空的PCM数据: \"$sentence\"")
-                audioPlayer.enqueueMarker { sendCommand(Command.InternalSentenceStart(index, sentence)) }
-                audioPlayer.enqueueMarker { sendCommand(Command.InternalSentenceEnd(index, sentence)) }
-                return true
+                audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_START, startCallback)
+                audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_END, endCallback)
+                return SynthesisResult.Success
             }
 
-            audioPlayer.enqueueMarker { sendCommand(Command.InternalSentenceStart(index, sentence)) }
-            audioPlayer.enqueuePcm(pcm = pcmData, sampleRate = sampleRate, source = SynthesisMode.ONLINE)
-            audioPlayer.enqueueMarker { sendCommand(Command.InternalSentenceEnd(index, sentence)) }
-            return true
+            audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_START, startCallback)
+            audioPlayer.enqueuePcm(pcm = pcmData, sampleRate = sampleRate, source = SynthesisMode.ONLINE, sentenceIndex = index)
+            audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_END, endCallback)
+
+            return SynthesisResult.Success
         } catch (e: IOException) {
-            Log.e(TAG, "在线合成网络或IO错误 (句子 $index): ${e.message}")
-            return false
+            val reason = "在线合成网络或IO错误 (句子 $index): ${e.message}"
+            Log.e(TAG, reason)
+            return SynthesisResult.Failure(reason)
         } catch (e: Exception) {
-            Log.e(TAG, "在线合成或解码时发生意外错误 (句子 $index)", e)
-            if (coroutineContext.isActive) sendCommand(Command.InternalError("在线合成或解码失败: ${e.message}"))
-            return false
+            val reason = "在线合成或解码时发生意外错误 (句子 $index): ${e.message}"
+            Log.e(TAG, reason, e)
+            return SynthesisResult.Failure(reason)
         }
     }
 
-    private suspend fun performOfflineSynthesis(index: Int, sentence: String): Boolean {
+    private suspend fun performOfflineSynthesis(index: Int, sentence: String): SynthesisResult {
         return engineMutex.withLock {
             try {
                 Log.d(TAG, "正在合成[离线]句子 $index: \"$sentence\"")
                 val prepareResult = prepareForSynthesis(sentence, currentSpeed, currentVolume)
                 if (prepareResult != 0) {
-                    Log.e(TAG, "离线引擎准备失败 (代码: $prepareResult)，句子: $sentence")
-                    if (coroutineContext.isActive) sendCommand(Command.InternalError("准备句子失败$prepareResult: $sentence"))
-                    return@withLock false
+                    val reason = "离线引擎准备失败 (代码: $prepareResult)，句子: $sentence"
+                    Log.e(TAG, reason)
+                    return@withLock SynthesisResult.Failure(reason)
                 }
+
+                val startCallback = { sendCommand(Command.InternalSentenceStart(index, sentence)) }
+                val endCallback = { sendCommand(Command.InternalSentenceEnd(index, sentence)) }
+
                 val synthResult = IntArray(1)
                 val pcmArray = pcmBuffer.array()
                 var hasEnqueuedStartMarker = false
                 while (coroutineContext.isActive) {
                     val synthesisStatus = nativeEngine?.synthesize(pcmArray, TtsConstants.PCM_BUFFER_SIZE, synthResult, 1) ?: -1
                     if (synthesisStatus == -1) {
-                        Log.e(TAG, "本地合成失败，状态码: -1"); nativeEngine?.reset(); return@withLock false
+                        val reason = "本地合成失败，状态码: -1"
+                        Log.e(TAG, reason)
+                        nativeEngine?.reset()
+                        return@withLock SynthesisResult.Failure(reason)
                     }
                     val numSamples = synthResult[0]
                     if (numSamples <= 0) break
                     if (!hasEnqueuedStartMarker) {
-                        audioPlayer.enqueueMarker { sendCommand(Command.InternalSentenceStart(index, sentence)) }
+                        audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_START, startCallback)
                         hasEnqueuedStartMarker = true
                     }
                     val validSamples = numSamples.coerceAtMost(pcmArray.size)
                     if (validSamples > 0) {
                         val validPcm = pcmArray.copyOf(validSamples)
-                        audioPlayer.enqueuePcm(pcm = validPcm, sampleRate = TtsConstants.DEFAULT_SAMPLE_RATE, source = SynthesisMode.OFFLINE)
+                        audioPlayer.enqueuePcm(pcm = validPcm, sampleRate = TtsConstants.DEFAULT_SAMPLE_RATE, source = SynthesisMode.OFFLINE, sentenceIndex = index)
                     }
                     delay(1)
                 }
                 if (coroutineContext.isActive) {
-                    if (!hasEnqueuedStartMarker) { audioPlayer.enqueueMarker { sendCommand(Command.InternalSentenceStart(index, sentence)) } }
-                    audioPlayer.enqueueMarker { sendCommand(Command.InternalSentenceEnd(index, sentence)) }
+                    if (!hasEnqueuedStartMarker) {
+                        audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_START, startCallback)
+                    }
+                    audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_END, endCallback)
                 }
-                true
+                SynthesisResult.Success
             } catch (e: CancellationException) {
-                false
+                SynthesisResult.Failure("协程被取消")
             } catch (e: Exception) {
-                Log.e(TAG, "离线合成时发生异常", e)
-                if (coroutineContext.isActive) sendCommand(Command.InternalError("离线合成错误: ${e.message}"))
-                false
+                val reason = "离线合成时发生异常: ${e.message}"
+                Log.e(TAG, reason, e)
+                SynthesisResult.Failure(reason)
             } finally {
                 nativeEngine?.reset()
             }
@@ -383,7 +442,7 @@ class TtsSynthesizer(
         if (currentState != newState) {
             currentState = newState
             currentCallback?.onStateChanged(newState)
-            _isPlaying.value = newState == TtsPlaybackState.PLAYING
+            _isPlaying.value = newState == TtsPlaybackState.PLAYING || newState == TtsPlaybackState.PAUSED
         }
     }
 }
