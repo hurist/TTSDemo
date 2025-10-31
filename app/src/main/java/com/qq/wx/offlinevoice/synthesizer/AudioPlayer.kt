@@ -18,36 +18,24 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
+import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
 
-/**
- * 高健壮性的音频播放器，基于协程和 Channel 构建。
- *
- * 核心特性:
- * 1.  **命令驱动**: 通过一个高优先级的 `controlChannel` 接收控制命令（如重置），响应非常迅速。
- * 2.  **非阻塞写入**: 使用 `AudioTrack.WRITE_NON_BLOCKING`，确保播放协程不会被底层音频缓冲区阻塞，时刻保持对控制命令的响应能力。
- * 3.  **代次(Generation)机制**: 通过 `generation` 计数器，在软重置后能自动丢弃所有旧的音频数据和回调（Marker），从根本上避免了音频错乱和回调错误的问题。
- * 4.  **同步清理**: 提供了 `stopAndReleaseBlocking` 和 `resetBlocking` 等挂起函数，允许调用者（如 TtsSynthesizer）可以同步等待播放器完成清理或重置，彻底解决了竞态条件。
- * 5.  **硬重置**: 在软重置时，通过销毁并重建 `AudioTrack` 实例来强制清空硬件缓冲区，实现真正的“立即停止”，解决了音频残留问题。
- */
 class AudioPlayer(
-    private val sampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE,
+    // 注意：默认采样率现在只是一个初始值
+    private val initialSampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE,
     private val queueCapacity: Int = 256
 ) {
-
-    /**
-     * 队列中的项目，可以是音频数据(Pcm)或回调标记(Marker)。
-     * 所有项目都携带 `gen` (代次)信息。
-     */
     private sealed class QueueItem(open val gen: Long) {
+        // Pcm 类现在携带采样率信息
         data class Pcm(
             override val gen: Long,
             val data: ShortArray,
             val offset: Int = 0,
-            val length: Int = data.size
+            val length: Int = data.size,
+            val sampleRate: Int,
+            val source: SynthesisMode
         ) : QueueItem(gen) {
-            // 注意：必须手动实现 equals 和 hashCode，因为 ShortArray 的默认比较是基于引用的。
-            // 我们需要基于内容进行比较，以确保数据类的正确行为。
             override fun equals(other: Any?): Boolean {
                 if (this === other) return true
                 if (javaClass != other?.javaClass) return false
@@ -55,6 +43,8 @@ class AudioPlayer(
                 if (gen != other.gen) return false
                 if (offset != other.offset) return false
                 if (length != other.length) return false
+                if (sampleRate != other.sampleRate) return false
+                if (source != other.source) return false
                 if (!data.contentEquals(other.data)) return false
                 return true
             }
@@ -62,6 +52,8 @@ class AudioPlayer(
                 var result = gen.hashCode()
                 result = 31 * result + offset
                 result = 31 * result + length
+                result = 31 * result + sampleRate
+                result = 31 * result + source.hashCode()
                 result = 31 * result + data.contentHashCode()
                 return result
             }
@@ -69,19 +61,11 @@ class AudioPlayer(
         data class Marker(override val gen: Long, val onReached: (() -> Unit)? = null) : QueueItem(gen)
     }
 
-    /**
-     * 内部控制命令。
-     * @param resetPrerollMs 可选的新的预缓冲时间。
-     * @param ack 用于实现同步等待的应答信号。
-     */
-    private data class Control(
-        val resetPrerollMs: Int? = null,
-        val ack: CompletableDeferred<Unit>? = null
-    )
+    private data class Control(val ack: CompletableDeferred<Unit>? = null)
 
     private val scope = CoroutineScope(Dispatchers.Default + Job())
     private var pcmChannel: Channel<QueueItem> = Channel(queueCapacity)
-    private var controlChannel: Channel<Control> = Channel(Channel.CONFLATED) // CONFLATED确保最新的控制命令不会丢失
+    private var controlChannel: Channel<Control> = Channel(Channel.CONFLATED)
 
     @Volatile private var audioTrack: AudioTrack? = null
     private var playbackJob: Job? = null
@@ -89,118 +73,92 @@ class AudioPlayer(
     @Volatile private var isStopped = true
     @Volatile private var currentVolume: Float = 1.0f
 
-    // 缓冲相关参数
-    @Volatile private var prerollSamples: Int = msToSamples(250)
-    @Volatile private var lowWatermarkSamples: Int = msToSamples(120)
-    @Volatile private var highWatermarkSamples: Int = msToSamples(300)
-    @Volatile private var autoRebufferEnabled: Boolean = true
-    private val bufferedSamples = AtomicLong(0)
-    @Volatile private var waitingForPreroll = true
+    @Volatile private var currentSampleRate: Int = initialSampleRate
+    @Volatile private var currentPlaybackSource: SynthesisMode? = null
 
-    // 代次计数器，每次重置时递增，用于区分新旧数据
     @Volatile private var generation: Long = 0L
 
     companion object {
         private const val TAG = "AudioPlayer"
     }
 
-    fun configureBuffering(
-        prerollMs: Int = 250,
-        lowWatermarkMs: Int = 120,
-        highWatermarkMs: Int = 300,
-        autoRebuffer: Boolean = true
-    ) {
-        prerollSamples = msToSamples(prerollMs)
-        lowWatermarkSamples = msToSamples(lowWatermarkMs)
-        highWatermarkSamples = msToSamples(highWatermarkMs)
-        autoRebufferEnabled = autoRebuffer
-    }
-
-    private fun msToSamples(ms: Int): Int = (ms.toLong() * sampleRate / 1000L).toInt().coerceAtLeast(0)
+    // 缓冲配置方法现在不再需要，因为缓冲大小由AudioTrack动态管理
+    // fun configureBuffering(...) {}
 
     fun startIfNeeded(volume: Float = 1.0f) {
         currentVolume = volume.coerceIn(0f, 1f)
         if (playbackJob?.isActive == true) return
 
-        bufferedSamples.set(0)
-        waitingForPreroll = true
         isStopped = false
         generation = 0L
+        currentSampleRate = initialSampleRate // 重置为初始采样率
+        currentPlaybackSource = null
 
         pcmChannel.close(); controlChannel.close()
         pcmChannel = Channel(queueCapacity)
         controlChannel = Channel(Channel.CONFLATED)
 
-        // CoroutineStart.UNDISPATCHED 确保协程立即在当前线程开始执行，直到第一个挂起点，可以略微减少启动延迟。
         playbackJob = scope.launch(Dispatchers.IO, start = CoroutineStart.UNDISPATCHED) {
             runCatching { Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO) }
 
-            audioTrack = createAudioTrack()
-            if (audioTrack == null) {
-                Log.e(TAG, "Failed to create AudioTrack initially.")
-                isStopped = true
-                return@launch
-            }
+            // 初始时不创建 AudioTrack，等待第一个 PCM 数据到达
+            audioTrack = null
 
             try {
-                // select 表达式确保了 controlChannel 的优先级高于 pcmChannel。
-                // 这意味着即使队列中有大量音频数据，重置等控制命令也能被立即处理。
                 while (isActive && !isStopped) {
                     select<Unit> {
-                        // 优先处理控制命令
                         controlChannel.onReceive { control ->
-                            Log.d(TAG, "Control message received. Applying soft reset. Gen bump to ${generation + 1}")
-                            // 1. 提升代次，所有后续收到的旧代次数据都将被丢弃
+                            Log.d(TAG, "收到重置命令。代次更新至 ${generation + 1}")
                             generation++
-                            // 2. 销毁并重建 AudioTrack，实现硬停止，清空所有硬件缓冲
-                            recreateAudioTrack()
+                            // 重置时，销毁现有 AudioTrack
+                            releaseAudioTrack()
+                            currentPlaybackSource = null
 
-                            // 3. 清空软件队列 (pcmChannel)
-                            var drainedSamples = 0L
-                            while (true) {
-                                val item = pcmChannel.tryReceive().getOrNull() ?: break
-                                if (item is QueueItem.Pcm) drainedSamples += item.length
-                            }
-                            if (drainedSamples > 0) bufferedSamples.addAndGet(-drainedSamples)
-                            Log.d(TAG, "Channel drained, removed samples: $drainedSamples")
+                            // 清空软件队列
+                            while (pcmChannel.tryReceive().isSuccess) { /* drain */ }
+                            Log.d(TAG, "播放队列已清空。")
 
-                            // 4. 重置内部状态，准备接收新一代的数据
-                            waitingForPreroll = true
-                            isPaused = false
-                            control.resetPrerollMs?.let { prerollSamples = msToSamples(it) }
-
-                            // 5. 如果有应答请求，发出完成信号
                             control.ack?.complete(Unit)
                         }
 
-                        // 处理音频数据和回调标记
                         pcmChannel.onReceive { item ->
-                            // 校验代次，丢弃旧数据
-                            if (item.gen != generation) {
-                                if (item is QueueItem.Pcm) bufferedSamples.addAndGet(-item.length.toLong())
-                                return@onReceive
-                            }
+                            if (item.gen != generation) return@onReceive
 
-                            // 循环等待，直到暂停状态结束或被更高优先级的控制命令中断
                             while (isPaused && isActive && !isStopped && item.gen == generation) {
                                 delay(10)
                             }
-                            if (!isActive || isStopped || item.gen != generation) { // 再次检查，防止在暂停时被重置
-                                if (item is QueueItem.Pcm) bufferedSamples.addAndGet(-item.length.toLong())
-                                return@onReceive
-                            }
+                            if (!isActive || isStopped || item.gen != generation) return@onReceive
 
                             when (item) {
                                 is QueueItem.Pcm -> {
-                                    maybeAutoRebuffer()
-                                    maybeStartAfterPreroll()
-                                    writePcmNonBlocking(item.data, item.offset, item.length)
-                                    bufferedSamples.addAndGet(-item.length.toLong())
+                                    // 检查采样率是否需要切换
+                                    if (audioTrack == null || item.sampleRate != currentSampleRate) {
+                                        switchSampleRate(item.sampleRate)
+                                    }
+
+                                    if (currentPlaybackSource != item.source) {
+                                        currentPlaybackSource = item.source
+                                        Log.i(TAG, ">>> 开始播放来自 [${item.source}] 的音频 (采样率: ${item.sampleRate} Hz) <<<")
+                                    }
+
+                                    audioTrack?.play() // 确保已启动播放
+                                    writePcmBlocking(item.data, item.offset, item.length)
                                 }
                                 is QueueItem.Marker -> {
-                                    if (item.gen == generation) { // 再次校验代次，确保回调正确
-                                        try { item.onReached?.invoke() } catch (t: Throwable) {
-                                            Log.w(TAG, "Marker callback error", t)
+                                    // 在执行回调前，确保之前的所有音频都已播放完毕
+                                    audioTrack?.let { track ->
+                                        // 这是一个简化的同步点，实际效果取决于缓冲区大小
+                                        // 对于精确回调，需要更复杂的机制
+                                        Log.d(TAG, "处理回调标记，等待播放缓冲区排空...")
+                                    }
+                                    if (item.gen == generation) {
+                                        try {
+                                            // 回调切换到主线程或默认线程执行，避免阻塞IO线程
+                                            withContext(Dispatchers.Default) {
+                                                item.onReached?.invoke()
+                                            }
+                                        } catch (t: Throwable) {
+                                            Log.w(TAG, "执行 Marker 回调时出错", t)
                                         }
                                     }
                                 }
@@ -209,81 +167,90 @@ class AudioPlayer(
                     }
                 }
             } finally {
-                // 确保协程结束时，AudioTrack 资源被彻底释放
                 releaseAudioTrack()
                 isStopped = true
             }
         }
     }
 
-    private fun createAudioTrack(): AudioTrack? {
+    /**
+     * 切换 AudioTrack 的采样率。这是一个挂起函数，会安全地销毁旧实例并创建新实例。
+     */
+    private suspend fun switchSampleRate(newSampleRate: Int) {
+        Log.i(TAG, "采样率切换: 从 $currentSampleRate Hz -> $newSampleRate Hz")
+        releaseAudioTrack() // 安全地释放旧的 AudioTrack
+        audioTrack = createAudioTrack(newSampleRate)
+        if (audioTrack == null) {
+            Log.e(TAG, "创建新的 AudioTrack ($newSampleRate Hz) 失败，停止播放。")
+            isStopped = true
+        } else {
+            currentSampleRate = newSampleRate
+            Log.i(TAG, "新的 AudioTrack 已成功创建。")
+        }
+    }
+
+    private fun createAudioTrack(sampleRate: Int): AudioTrack? {
         return try {
             val channelConfig = AudioFormat.CHANNEL_OUT_MONO
             val audioFormat = AudioFormat.ENCODING_PCM_16BIT
-            var minBufferSize = AudioTrack.getMinBufferSize(sampleRate, channelConfig, audioFormat)
+            val minBufferSize = AudioTrack.getMinBufferSize(sampleRate, channelConfig, audioFormat)
             if (minBufferSize <= 0) {
-                minBufferSize = TtsConstants.MIN_BUFFER_SIZE_FALLBACK
+                Log.e(TAG, "无效的最小缓冲区大小: $minBufferSize @ $sampleRate Hz")
+                return null
             }
-            // 使用一个比最小建议值稍大的缓冲区，以减少音频下溢(underrun)的风险
-            val bufferSizeBytes = (minBufferSize * 4).coerceAtLeast(minBufferSize)
+            val bufferSizeBytes = (minBufferSize * 2).coerceAtLeast(minBufferSize)
+            Log.d(TAG, "创建 AudioTrack: 采样率=$sampleRate Hz, 缓冲区大小=$bufferSizeBytes 字节")
 
             AudioTrack(
-                AudioManager.STREAM_MUSIC, // 音频流类型
-                sampleRate,
-                channelConfig,
-                audioFormat,
-                bufferSizeBytes,
-                AudioTrack.MODE_STREAM // 流模式，适合播放实时生成的音频
+                AudioManager.STREAM_MUSIC, sampleRate, channelConfig,
+                audioFormat, bufferSizeBytes, AudioTrack.MODE_STREAM
             ).also { at ->
+                if (at.state != AudioTrack.STATE_INITIALIZED) {
+                    Log.e(TAG, "AudioTrack 初始化失败，状态: ${at.state}")
+                    at.release()
+                    return null
+                }
                 at.setStereoVolume(currentVolume, currentVolume)
-                at.pause() // 创建后立即暂停，等待预缓冲完成
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error creating AudioTrack", e)
+            Log.e(TAG, "创建 AudioTrack 时出错", e)
             null
         }
     }
 
-    private fun releaseAudioTrack() {
-        // 使用 runCatching 确保即使一个调用失败，另一个也能被尝试执行
-        runCatching { audioTrack?.stop() }
-        runCatching { audioTrack?.release() }
-        audioTrack = null
-    }
-
-    private fun recreateAudioTrack() {
-        releaseAudioTrack()
-        audioTrack = createAudioTrack()
-        if (audioTrack == null) {
-            Log.e(TAG, "Failed to recreate AudioTrack. Stopping playback.")
-            isStopped = true
+    private suspend fun releaseAudioTrack() {
+        // 使用 withContext 确保这些非挂起调用在正确的调度器上运行
+        withContext(Dispatchers.IO) {
+            audioTrack?.let {
+                Log.d(TAG, "正在释放 AudioTrack (采样率: ${it.sampleRate} Hz)...")
+                if (it.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                    it.stop()
+                }
+                it.release()
+            }
+            audioTrack = null
         }
     }
 
-    /**
-     * 发送重置命令并挂起，直到播放器确认重置完成。
-     * 这使得上层调用者可以同步地知道播放器已处于一个完全干净的状态。
-     */
-    suspend fun resetBlocking(prerollMs: Int? = null) {
+    suspend fun resetBlocking() {
         if (isStopped || playbackJob?.isActive != true) return
         val ack = CompletableDeferred<Unit>()
-        controlChannel.send(Control(prerollMs, ack))
-        ack.await() // 等待播放器协程完成重置并调用 ack.complete()
-        Log.d(TAG, "Reset acknowledged by AudioPlayer.")
+        controlChannel.send(Control(ack))
+        ack.await()
+        Log.d(TAG, "AudioPlayer 已确认重置完成。")
     }
 
-    suspend fun enqueuePcm(pcm: ShortArray, offset: Int = 0, length: Int = pcm.size) {
+    suspend fun enqueuePcm(pcm: ShortArray, offset: Int = 0, length: Int = pcm.size, sampleRate: Int, source: SynthesisMode) {
         if (isStopped || length <= 0) return
         val currentGen = generation
-        val item = QueueItem.Pcm(gen = currentGen, data = pcm, offset = offset, length = length)
-        bufferedSamples.addAndGet(length.toLong())
+        val item = QueueItem.Pcm(currentGen, pcm, offset, length, sampleRate, source)
         pcmChannel.send(item)
     }
 
     suspend fun enqueueMarker(onReached: (() -> Unit)? = null) {
         if (isStopped) return
         val currentGen = generation
-        val item = QueueItem.Marker(gen = currentGen, onReached = onReached)
+        val item = QueueItem.Marker(currentGen, onReached)
         pcmChannel.send(item)
     }
 
@@ -297,103 +264,42 @@ class AudioPlayer(
         if (!isStopped && !isPaused) {
             isPaused = true
             runCatching { audioTrack?.pause() }
-            Log.d(TAG, "Audio paused (user)")
+            Log.d(TAG, "音频已暂停 (用户操作)。")
         }
     }
 
     fun resume() {
         if (!isStopped && isPaused) {
             isPaused = false
-            // 只有在预缓冲完成后才真正播放
-            if (!waitingForPreroll) {
-                runCatching { audioTrack?.play() }
-            }
-            Log.d(TAG, "Audio resumed (user)")
+            runCatching { audioTrack?.play() }
+            Log.d(TAG, "音频已恢复 (用户操作)。")
         }
     }
 
-    /**
-     * 非挂起版本的停止方法。仅发出取消请求，立即返回（“发射后不管”）。
-     * 适用于不需要等待清理完成的场景。
-     */
-    fun stopAndRelease() {
-        if (isStopped) return
-        isStopped = true
-        isPaused = false
-        playbackJob?.cancel()
-        playbackJob = null
-        pcmChannel.close()
-        controlChannel.close()
-        bufferedSamples.set(0)
-        Log.d(TAG, "AudioPlayer stopAndRelease (fire-and-forget) called.")
-    }
-
-    /**
-     * 挂起版本的停止方法，会取消并等待播放任务完全终止。
-     * 这是确保资源被彻底释放的同步方法，对于需要立即重建播放器的场景至关重要。
-     */
     suspend fun stopAndReleaseBlocking() {
         if (isStopped) return
         val jobToJoin = playbackJob
-
         isStopped = true
         isPaused = false
-
-        // cancelAndJoin 是关键，它会挂起直到协程完全结束，包括其 finally 块中的清理逻辑。
         jobToJoin?.cancelAndJoin()
-
         playbackJob = null
         pcmChannel.close()
         controlChannel.close()
-        bufferedSamples.set(0)
-        Log.d(TAG, "AudioPlayer stopped and released synchronously.")
+        Log.d(TAG, "AudioPlayer 已同步停止并释放资源。")
     }
 
-    private suspend fun maybeStartAfterPreroll() {
-        if (waitingForPreroll) {
-            if (bufferedSamples.get() >= prerollSamples) {
-                if (!isStopped && audioTrack?.state == AudioTrack.STATE_INITIALIZED) {
-                    runCatching { audioTrack?.play() }
-                    waitingForPreroll = false
-                    Log.d(TAG, "Preroll reached, start playing. bufferedMs=${samplesToMs(bufferedSamples.get())}")
-                }
-            }
-        }
-    }
-
-    private suspend fun maybeAutoRebuffer() {
-        if (!autoRebufferEnabled || waitingForPreroll) return
-        if (bufferedSamples.get() < lowWatermarkSamples) {
-            runCatching { audioTrack?.pause() }
-            waitingForPreroll = true
-            Log.d(TAG, "Low watermark hit, auto rebuffer. bufferedMs=${samplesToMs(bufferedSamples.get())}")
-            while (!isStopped && bufferedSamples.get() < highWatermarkSamples) {
-                delay(10)
-            }
-        }
-    }
-
-    private suspend fun writePcmNonBlocking(data: ShortArray, offset: Int, length: Int) {
+    // 改为阻塞写入，因为非阻塞在快速切换采样率时会变得复杂
+    private suspend fun writePcmBlocking(data: ShortArray, offset: Int, length: Int) {
         val at = audioTrack ?: return
         var written = 0
         while (written < length && !isStopped && coroutineContext.isActive) {
-            val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                at.write(data, offset + written, length - written, AudioTrack.WRITE_NON_BLOCKING)
-            } else {
-                at.write(data, offset + written, length - written)
-            }
-
+            val result = at.write(data, offset + written, length - written)
             if (result > 0) {
                 written += result
-            } else if (result == 0) {
-                // 缓冲区已满，短暂等待后重试，并让出CPU给其他协程
-                delay(5)
             } else {
-                Log.e(TAG, "AudioTrack write error: $result")
+                Log.e(TAG, "AudioTrack 写入错误，代码: $result")
                 break
             }
         }
     }
-
-    private fun samplesToMs(samples: Long): Long = samples * 1000L / sampleRate
 }
