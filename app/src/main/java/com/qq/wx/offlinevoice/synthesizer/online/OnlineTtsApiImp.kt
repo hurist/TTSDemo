@@ -1,6 +1,7 @@
 package com.qq.wx.offlinevoice.synthesizer.online
 
 import android.util.Log
+import com.qq.wx.offlinevoice.synthesizer.Speaker
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -14,13 +15,13 @@ object WxReaderApi : OnlineTtsApi {
 
     override suspend fun fetchTtsAudio(
         text: String,
-        voice: String
+        speaker: Speaker
     ) = suspendCancellableCoroutine<ByteArray> { ctx ->
 
         val json = JSONObject()
         json.put("key_prefix", "847310")
         json.put("chapter_id", 43)
-        json.put("model_name", "tts_valle")
+        json.put("model_name", speaker.modelName)
         json.put("style", 1)
         json.put("text_utf8", text)
         json.put("token", "AkZi+UMeBWOM9NFtwpsBtxsOENJ62jVbhzXgl3FPbSYUZhSKCCo5DzHMbrCrJhMS")

@@ -16,6 +16,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
+import com.qq.wx.offlinevoice.synthesizer.Speaker
 import com.qq.wx.offlinevoice.synthesizer.TtsCallback
 import com.qq.wx.offlinevoice.synthesizer.TtsPlaybackState
 import com.qq.wx.offlinevoice.synthesizer.TtsSynthesizer
@@ -51,6 +52,20 @@ class MainActivity : AppCompatActivity() {
     private lateinit var textViewStatus: TextView
     private lateinit var textViewSpeed: TextView
 
+
+    private val speakers = listOf(
+        Speaker(modelName = "tts_valle", isMale = true),
+        Speaker(modelName = "tts_valle_m468_19_0718", isMale = true),
+        Speaker(modelName = "tts_valle_caiyu515", isMale = false),
+        Speaker(modelName = "tts_valle_10373_f561_0619", isMale = false),
+        Speaker(modelName = "chensheng256_vitsb_cn", isMale = true),
+        Speaker(modelName = "zhaoyun256_vitsb_cn", isMale = false),
+        Speaker(modelName = "talkmale", isMale = true),
+        Speaker(modelName = "female3", isMale = false),
+        Speaker(modelName = "pdb", isMale = true),
+        Speaker(modelName = "male3", isMale = true)
+    )
+
     // 可用的发音人列表
     private val availableVoices = listOf(
         "F191",
@@ -63,7 +78,7 @@ class MainActivity : AppCompatActivity() {
         "maleen",
         "maleen_4"
     )
-    private var currentVoice = "F191"
+    private var currentVoice: Speaker = speakers[0]
 
     companion object {
         private const val TAG = "MainActivity"
@@ -276,7 +291,7 @@ class MainActivity : AppCompatActivity() {
         })
 
         // 设置发音人下拉框
-        val voiceAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, availableVoices)
+        val voiceAdapter = ArrayAdapter(this, android.R.layout.simple_spinner_item, speakers.map { it.modelName })
         voiceAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
         spinnerVoice.adapter = voiceAdapter
         spinnerVoice.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
@@ -286,7 +301,7 @@ class MainActivity : AppCompatActivity() {
                 position: Int,
                 id: Long
             ) {
-                currentVoice = availableVoices[position]
+                currentVoice = speakers[position]
                 Log.d(TAG, "选择发音人: $currentVoice")
 
                 // 动态修改发音人

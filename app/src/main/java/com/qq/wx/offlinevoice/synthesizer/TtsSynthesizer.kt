@@ -28,7 +28,7 @@ import kotlin.coroutines.coroutineContext
 
 class TtsSynthesizer(
     context: Context,
-    private val voiceName: String
+    private val speaker: Speaker
 ) {
     private sealed class SynthesisResult {
         object Success : SynthesisResult()
@@ -39,7 +39,7 @@ class TtsSynthesizer(
         data class Speak(val text: String) : Command()
         data class SetSpeed(val speed: Float) : Command()
         data class SetVolume(val volume: Float) : Command()
-        data class SetVoice(val voiceName: String) : Command()
+        data class SetVoice(val speaker: Speaker) : Command()
         data class SetCallback(val callback: TtsCallback?) : Command()
         object Pause : Command()
         object Resume : Command()
@@ -58,14 +58,13 @@ class TtsSynthesizer(
     private var synthesisSentenceIndex: Int = 0
     private var currentSpeed: Float = 1.0f
     private var currentVolume: Float = 1.0f
-    private var currentVoice: String = voiceName
+    private var currentSpeaker = speaker
     private var currentCallback: TtsCallback? = null
     private val strategyManager: SynthesisStrategyManager
     private val onlineApi: OnlineTtsApi
     private val mp3Decoder: Mp3Decoder
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
-    private val voiceCode: String = voiceName
     private val voiceDataPath: String
     private val pcmBuffer: ShortBuffer = ShortBuffer.allocate(TtsConstants.PCM_BUFFER_SIZE)
     private val scope = CoroutineScope(Dispatchers.Default + Job())
@@ -114,7 +113,7 @@ class TtsSynthesizer(
     fun setCallback(callback: TtsCallback?) = sendCommand(Command.SetCallback(callback))
     fun setSpeed(speed: Float) = sendCommand(Command.SetSpeed(speed))
     fun setVolume(volume: Float) = sendCommand(Command.SetVolume(volume))
-    fun setVoice(voiceName: String) = sendCommand(Command.SetVoice(voiceName))
+    fun setVoice(speaker: Speaker) = sendCommand(Command.SetVoice(speaker))
     fun speak(text: String) = sendCommand(Command.Speak(text))
     fun pause() = sendCommand(Command.Pause)
     fun resume() = sendCommand(Command.Resume)
@@ -135,7 +134,7 @@ class TtsSynthesizer(
                 is Command.Speak -> handleSpeak(command.text)
                 is Command.SetSpeed -> handleSetSpeed(command.speed)
                 is Command.SetVolume -> handleSetVolume(command.volume)
-                is Command.SetVoice -> handleSetVoice(command.voiceName)
+                is Command.SetVoice -> handleSetSpeaker(command.speaker)
                 is Command.Pause -> handlePause()
                 is Command.Resume -> handleResume()
                 is Command.Stop -> handleStop()
@@ -175,7 +174,7 @@ class TtsSynthesizer(
     }
 
     private suspend fun handleSetSpeed(speed: Float) { val newSpeed = speed.coerceIn(0.5f, 3.0f); if (currentSpeed == newSpeed) return; currentSpeed = newSpeed; if (currentState == TtsPlaybackState.PLAYING) { softRestart() } }
-    private suspend fun handleSetVoice(voiceName: String) { if (currentVoice == voiceName) return; currentVoice = voiceName; if (currentState == TtsPlaybackState.PLAYING) { softRestart() } }
+    private suspend fun handleSetSpeaker(speaker: Speaker) { if (speaker == currentSpeaker) return; currentSpeaker = speaker; if (currentState == TtsPlaybackState.PLAYING) { softRestart() } }
     private fun handleSetVolume(volume: Float) { val newVolume = volume.coerceIn(0.0f, 1.0f); if (currentVolume == newVolume) return; currentVolume = newVolume; audioPlayer.setVolume(newVolume) }
 
     private fun handlePause() {
@@ -325,7 +324,7 @@ class TtsSynthesizer(
     private suspend fun performOnlineSynthesis(index: Int, sentence: String): SynthesisResult {
         try {
             Log.d(TAG, "正在合成[在线]句子 $index: \"$sentence\"")
-            val mp3Data = onlineApi.fetchTtsAudio(sentence, currentVoice)
+            val mp3Data = onlineApi.fetchTtsAudio(sentence, currentSpeaker)
             if (!coroutineContext.isActive) return SynthesisResult.Failure("协程被取消")
             if (mp3Data.isEmpty()) {
                 val reason = "在线API返回了空的音频数据"
@@ -422,9 +421,9 @@ class TtsSynthesizer(
 
     private fun prepareForSynthesis(text: String, speed: Float, volume: Float): Int {
         synchronized(this) {
-            if (currentVoice != currentVoiceCode) {
-                currentVoiceCode = currentVoice
-                nativeEngine?.setVoiceName(currentVoice)
+            if (currentSpeaker.offlineModelName != currentVoiceCode) {
+                currentVoiceCode = currentSpeaker.offlineModelName
+                nativeEngine?.setVoiceName(currentSpeaker.offlineModelName)
             }
             nativeEngine?.setSpeed(speed)
             nativeEngine?.setVolume(volume)
@@ -432,7 +431,7 @@ class TtsSynthesizer(
             for (attempt in 0 until TtsConstants.MAX_PREPARE_RETRIES) {
                 prepareResult = nativeEngine?.prepareUTF8(text.toByteArray()) ?: -1
                 if (prepareResult == 0) break
-                nativeEngine?.setVoiceName(currentVoice)
+                nativeEngine?.setVoiceName(currentSpeaker.offlineModelName)
             }
             return prepareResult
         }
