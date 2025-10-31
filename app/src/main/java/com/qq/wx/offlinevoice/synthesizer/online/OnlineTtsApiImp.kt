@@ -24,7 +24,7 @@ object WxReaderApi : OnlineTtsApi {
         json.put("model_name", speaker.modelName)
         json.put("style", 1)
         json.put("text_utf8", text)
-        json.put("token", "AkZi+UMeBWOM9NFtwpsBtxsOENJ62jVbhzXgl3FPbSYUZhSKCCo5DzHMbrCrJhMS")
+        json.put("token", "DaAORLl3IFk1EPAUqEveMHYaVtFatkm47orTNq87Q4j7xsG+3yhlAeK6KS1aEpUU")
         json.put("uid", 155027727)
         json.put("version", "9.3.8.10166907")
         json.put("busi_type", 1)
