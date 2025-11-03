@@ -1,7 +1,6 @@
 package com.qq.wx.offlinevoice.synthesizer
 
 import android.content.Context
-import android.os.Process
 import android.util.Log
 import com.qq.wx.offlinevoice.synthesizer.online.MediaCodecMp3Decoder
 import com.qq.wx.offlinevoice.synthesizer.online.Mp3Decoder
@@ -26,6 +25,18 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.coroutineContext
 
+/**
+ * TTS 合成器主类。
+ *
+ * 负责管理整个文本到语音的转换过程，包括：
+ * - 接收外部控制命令 (speak, stop, pause, setSpeed 等)。
+ * - 维护播放状态和句子队列。
+ * - 根据设定的策略 (TtsStrategy) 调度在线或离线合成任务。
+ * - 与 AudioPlayer 协作，将合成的音频数据流式传输以供播放。
+ * - 通过 TtsCallback 向外部通知状态变化、进度和错误。
+ *
+ * 该类采用基于 Kotlin 协程的 Actor 模型，通过一个 commandChannel 来处理所有外部请求，确保了线程安全和状态的一致性。
+ */
 class TtsSynthesizer(
     context: Context,
     private val speaker: Speaker
@@ -110,6 +121,7 @@ class TtsSynthesizer(
         sendCommand(Command.SetCallback(null))
     }
 
+    // --- 公共 API ---
     fun setCallback(callback: TtsCallback?) = sendCommand(Command.SetCallback(callback))
     fun setSpeed(speed: Float) = sendCommand(Command.SetSpeed(speed))
     fun setVolume(volume: Float) = sendCommand(Command.SetVolume(volume))
@@ -128,6 +140,7 @@ class TtsSynthesizer(
     }
     private fun sendCommand(command: Command) { commandChannel.trySend(command) }
 
+    // --- 命令处理器 ---
     private suspend fun commandProcessor() {
         for (command in commandChannel) {
             when (command) {
@@ -149,9 +162,9 @@ class TtsSynthesizer(
                         currentCallback?.onSynthesisComplete()
                     }
                 }
-                is Command.InternalSynthesisFinished -> { /* No-op */ }
+                is Command.InternalSynthesisFinished -> { /* 无操作 */ }
                 is Command.InternalError -> {
-                    Log.e(TAG, "收到严重内部错误，将执行 handleStop: ${command.message}")
+                    Log.e(TAG, "收到内部错误，将执行 handleStop: ${command.message}")
                     handleStop();
                     currentCallback?.onError(command.message)
                 }
@@ -159,12 +172,20 @@ class TtsSynthesizer(
         }
     }
 
+    // --- 命令处理实现 ---
     private suspend fun handleSpeak(text: String) {
-        if (currentState == TtsPlaybackState.PLAYING || currentState == TtsPlaybackState.PAUSED) { handleStop() }
+        if (currentState == TtsPlaybackState.PLAYING || currentState == TtsPlaybackState.PAUSED) {
+            Log.d(TAG, "已有语音在播放中，将先停止当前任务再开始新的任务。")
+            handleStop()
+        }
         isPausedByError = false
         sentences.clear()
         sentences.addAll(SentenceSplitter.splitWithDelimiters(text))
-        if (sentences.isEmpty()) { currentCallback?.onError("文本中没有有效的句子"); return }
+        if (sentences.isEmpty()) {
+            Log.w(TAG, "提供的文本中未找到有效句子。")
+            currentCallback?.onError("文本中没有有效的句子")
+            return
+        }
         playingSentenceIndex = 0
         synthesisSentenceIndex = 0
         audioPlayer.startIfNeeded(volume = currentVolume)
@@ -183,7 +204,7 @@ class TtsSynthesizer(
             return
         }
         if (currentState == TtsPlaybackState.PAUSED) {
-            Log.d(TAG, "已经是暂停状态，无需再次暂停。")
+            Log.d(TAG, "已经是暂停状态，无需再次操作。")
             return
         }
         if (isPausedByError) {
@@ -202,26 +223,51 @@ class TtsSynthesizer(
         audioPlayer.resume()
         currentCallback?.onResumed()
         if (isPausedByError) {
-            Log.i(TAG, "从错误暂停中恢复，正在重试合成...")
+            Log.i(TAG, "从错误暂停状态中恢复，正在重试合成...")
             isPausedByError = false
             synthesisJob?.cancelAndJoin()
             startSynthesis()
         }
     }
 
+    /**
+     * 核心修复：实现了激进的、高响应性的停止逻辑。
+     *
+     * 停止流程遵循“优先停止声音”的原则：
+     * 1.  **立即取消 (Cancel)**: 立即向合成任务(生产者)发送取消信号，但**不等待(join)**它完成。这会尽快停止网络请求或CPU密集型的本地合成计算。
+     * 2.  **立即重置 (Reset)**: 紧接着，命令 AudioPlayer(消费者)进行硬重置。由于 AudioPlayer 现已实现为可中断的，此命令会几乎瞬间被执行，清空所有软硬件音频缓冲区，从而立即停止声音。
+     * 3.  **最后等待 (Join)**: 在声音已经停止后，再安全地等待合成任务协程完全终止，以确保所有资源被正确释放，避免任何悬空状态。
+     *
+     * 这种 `cancel` -> `reset` -> `join` 的顺序确保了用户感知的停止延迟最小化。
+     */
     private suspend fun handleStop() {
         if (currentState == TtsPlaybackState.IDLE) return
+        Log.d(TAG, "开始执行 handleStop...")
         isPausedByError = false
-        synthesisJob?.cancelAndJoin()
+
+        // 1. 立即向合成任务发送取消信号，但不要等待(join)它。
+        val jobToJoin = synthesisJob
+        jobToJoin?.cancel()
         synthesisJob = null
+        Log.d(TAG, "已向合成任务发送取消信号。")
+
+        // 2. 立即重置播放器。此操作现在是高响应性的，会迅速中断音频。
         audioPlayer.resetBlocking()
+        Log.d(TAG, "播放器已同步重置，音频应已立即停止。")
+
+        // 3. 在声音停止后，再等待合成任务彻底结束。
+        jobToJoin?.join()
+        Log.d(TAG, "已确认合成任务完全终止。")
+
         sentences.clear()
         updateState(TtsPlaybackState.IDLE)
+        Log.d(TAG, "handleStop 执行完毕。")
     }
 
     private suspend fun handleRelease() { handleStop(); commandChannel.close(); strategyManager.release(); if (instanceCount.decrementAndGet() == 0) { nativeEngine?.destroy(); nativeEngine = null; currentVoiceCode = null } }
     private suspend fun softRestart() { Log.d(TAG, "软重启请求，句子索引: $playingSentenceIndex"); val restartIndex = playingSentenceIndex; synthesisJob?.cancelAndJoin(); synthesisJob = null; Log.d(TAG, "旧的合成任务已取消并等待结束。"); audioPlayer.resetBlocking(); Log.d(TAG, "播放器已同步重置。"); synthesisSentenceIndex = restartIndex; startSynthesis(); Log.d(TAG, "新的合成任务已从索引 $restartIndex 处启动。") }
 
+    // --- 合成逻辑 ---
     private fun startSynthesis() {
         synthesisJob = scope.launch(Dispatchers.Default) {
             val modeLock = Mutex()
@@ -297,7 +343,7 @@ class TtsSynthesizer(
 
                                     val indexToPreserve = playingSentenceIndex
                                     audioPlayer.resetQueueOnlyBlocking(preserveSentenceIndex = indexToPreserve)
-                                    Log.i(TAG, "播放队列已温柔重置，保留了正在播放的句子 $indexToPreserve 的数据。")
+                                    Log.i(TAG, "播放队列已软重置，保留了正在播放的句子 $indexToPreserve 的数据。")
 
                                     val nextSentenceIndex = playingSentenceIndex + 1
                                     synthesisSentenceIndex = nextSentenceIndex
@@ -328,7 +374,7 @@ class TtsSynthesizer(
             if (!coroutineContext.isActive) return SynthesisResult.Failure("协程被取消")
             if (mp3Data.isEmpty()) {
                 val reason = "在线API返回了空的音频数据"
-                Log.e(TAG, "$reason: \"$sentence\"")
+                Log.e(TAG, "$reason, 句子: \"$sentence\"")
                 return SynthesisResult.Failure(reason)
             }
             val decodedResult = mp3Decoder.decode(mp3Data)
@@ -398,7 +444,7 @@ class TtsSynthesizer(
                         val validPcm = pcmArray.copyOf(validSamples)
                         audioPlayer.enqueuePcm(pcm = validPcm, sampleRate = TtsConstants.DEFAULT_SAMPLE_RATE, source = SynthesisMode.OFFLINE, sentenceIndex = index)
                     }
-                    delay(1)
+                    delay(1) // 让出CPU，防止紧密循环
                 }
                 if (coroutineContext.isActive) {
                     if (!hasEnqueuedStartMarker) {
