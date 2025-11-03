@@ -211,26 +211,66 @@ class AudioPlayer(
     private suspend fun writePcmInChunks(item: QueueItem.Pcm) {
         val at = audioTrack ?: return
         var written = 0
+        // 若在本块中处理了“保当前句”的软重置，允许忽略代次变化以继续写完本块
+        var allowContinueAcrossGenBump = false
+
         while (written < item.length) {
-            // 1. 在每次写入前检查控制通道，这是实现即时响应的关键！
+            // 1) 每个小块前检查控制命令
             val control = controlChannel.tryReceive().getOrNull()
             if (control != null) {
-                Log.i(TAG, "在写入PCM数据中途检测到控制命令，立即中断写入并处理命令。")
+                val isHard = control.type == ResetType.HARD
+                val isSoft = control.type == ResetType.SOFT_QUEUE_ONLY
+                val preservesCurrent = control.preserveSentenceIndex == item.sentenceIndex
+
+                Log.i(
+                    TAG,
+                    "写入中捕获控制命令: type=${control.type}, preserve=${control.preserveSentenceIndex}, " +
+                            "currentSentence=${item.sentenceIndex}, written=$written/${item.length}"
+                )
+
+                // 处理命令（完成代次切换/保留/清队等，同时会完成 ack）
                 processControlCommand(control)
-                return // 中断当前句子的写入
+
+                if (isHard) {
+                    // 强制停止：立即中断
+                    Log.w(TAG, "检测到硬重置(HARD)，立即中断当前 PCM 写入。")
+                    return
+                }
+
+                if (isSoft && preservesCurrent) {
+                    // 这是“升级在线、保留当前句”的典型场景：继续把本块写完，避免断句
+                    allowContinueAcrossGenBump = true
+                    Log.d(
+                        TAG,
+                        "已处理软重置且保留当前句，允许跨代次继续完成本 PCM 块写入，避免截断。"
+                    )
+                    // 注意：此后 item.gen 可能和 generation 不一致，但本块内允许继续
+                } else {
+                    // 未保留当前句（或其它软命令）：为保证快速切换，仍然中断当前块
+                    Log.w(
+                        TAG,
+                        "收到软重置但未保留当前句，为提升响应速度，中断本 PCM 块写入。"
+                    )
+                    return
+                }
             }
-            // 2. 检查协程和播放器状态
-            if (!coroutineContext.isActive || isStopped || item.gen != generation) {
-                Log.d(TAG, "写入PCM时状态改变，中断写入。")
+
+            // 2) 协程/播放器状态检查；若代次变化且未允许跨代次写完，则中断
+            if (!coroutineContext.isActive || isStopped || (item.gen != generation && !allowContinueAcrossGenBump)) {
+                Log.d(
+                    TAG,
+                    "写入中检测到状态/代次变化(allowAcrossGen=$allowContinueAcrossGenBump)，中断本 PCM 块写入。"
+                )
                 return
             }
-            // 3. 等待暂停
-            while(isPaused && coroutineContext.isActive && !isStopped) { delay(10) }
 
-            // 4. 计算本次要写入的块大小
+            // 3) 暂停等待
+            while (isPaused && coroutineContext.isActive && !isStopped) { delay(10) }
+
+            // 4) 计算本次写入的分块大小
             val toWrite = (item.length - written).coerceAtMost(WRITE_CHUNK_SIZE)
 
-            // 5. 写入数据块
+            // 5) 写入
             val result = at.write(item.data, item.offset + written, toWrite)
             if (result > 0) {
                 written += result
