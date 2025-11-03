@@ -20,18 +20,12 @@ import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
 
 /**
- * 一个健壮的、高响应性的音频播放器，专为流式 TTS 设计。
+ * 流式 TTS 播放器，支持软/硬重置与在线/离线混播。
  *
- * 核心特性:
- * 1.  **中断式播放**: 能够将大的音频数据块分解成小块进行写入。在每个块之间，它会检查控制命令，
- *      从而可以被外部命令（如 stop）几乎立即中断，解决了播放长音频时无响应的问题。
- * 2.  **动态采样率切换**: 无缝地重建 AudioTrack 以播放不同采样率的音频流，支持在线/离线模式的混合播放。
- * 3.  **代次(Generation)机制**: 通过递增的 'generation' 计数器，自动丢弃所有过时的数据和回调，
- *      从根本上防止了在快速重置或状态切换（如模式升降级）时发生的状态错乱。
- * 4.  **双重重置模式**:
- *      - **硬重置 (Hard Reset)**: 立即清空所有软硬件缓冲区，用于全新播放或强制停止。
- *      - **温柔重置 (Soft Reset)**: 仅清空软件队列中的“未来”数据，保留指定句子数据，用于平滑的模式升级。
- * 5.  **优雅的流结束处理 (EOS)**: 能够接收一个“流结束”标记，在播放完所有缓冲数据后触发回调。
+ * 修复点（离线→在线升级时多念/乱序/回调错位）：
+ * - 引入“保护期”：软重置(保留当前句)后，仅允许该句的离线数据进入并播放；
+ *   其他离线数据直接丢弃；在线数据顺序暂存，待保护句播放彻底结束后按到达顺序吐回队列播放。
+ * - 不对队列做“延时重入”的操作，避免乱序；样本率切换仅在保护期结束后进行，避免离线尾巴被 flush。
  */
 class AudioPlayer(
     private val initialSampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE,
@@ -41,18 +35,31 @@ class AudioPlayer(
 
     private sealed class QueueItem(open val gen: Long) {
         data class Pcm(
-            override val gen: Long, val data: ShortArray, val offset: Int = 0, val length: Int = data.size,
-            val sampleRate: Int, val source: SynthesisMode, val sentenceIndex: Int
-        ) : QueueItem(gen) { /* equals/hashCode 已由 data class 自动生成 */ }
-        data class Marker(
-            override val gen: Long, val sentenceIndex: Int, val type: MarkerType, val onReached: (() -> Unit)? = null
+            override val gen: Long,
+            val data: ShortArray,
+            val offset: Int = 0,
+            val length: Int = data.size,
+            val sampleRate: Int,
+            val source: SynthesisMode,
+            val sentenceIndex: Int
         ) : QueueItem(gen)
+
+        data class Marker(
+            override val gen: Long,
+            val sentenceIndex: Int,
+            val type: MarkerType,
+            val source: SynthesisMode,
+            val onReached: (() -> Unit)? = null
+        ) : QueueItem(gen)
+
         data class EndOfStream(override val gen: Long, val onDrained: () -> Unit) : QueueItem(gen)
     }
 
     private enum class ResetType { HARD, SOFT_QUEUE_ONLY }
     private data class Control(
-        val type: ResetType, val ack: CompletableDeferred<Unit>? = null, val preserveSentenceIndex: Int = -1
+        val type: ResetType,
+        val ack: CompletableDeferred<Unit>? = null,
+        val preserveSentenceIndex: Int = -1
     )
 
     private val scope = CoroutineScope(Dispatchers.Default + Job())
@@ -68,13 +75,15 @@ class AudioPlayer(
     @Volatile private var currentPlaybackSource: SynthesisMode? = null
     @Volatile private var generation: Long = 0L
 
+    // 保护期状态：软重置(保留句)后开启；只允许该句的离线数据播放
+    @Volatile private var protectionActive: Boolean = false
+    @Volatile private var protectedSentenceIndex: Int = -1
+
+    // 保护期内到达的“在线数据”顺序缓冲（严格保持到达顺序，保护期结束后一次性吐回队列）
+    private val deferredOnline = ArrayDeque<QueueItem>()
+
     companion object {
         private const val TAG = "AudioPlayer"
-        /**
-         * 每次写入 AudioTrack 的数据块大小 (单位: shorts)。
-         * 这个值足够小，可以确保每次 write() 调用耗时很短，
-         * 使得播放循环可以频繁地检查新的控制命令，从而实现高响应性。
-         */
         private const val WRITE_CHUNK_SIZE = 2048
     }
 
@@ -82,9 +91,13 @@ class AudioPlayer(
         currentVolume = volume.coerceIn(0f, 1f)
         if (playbackJob?.isActive == true) return
         isStopped = false
+        isPaused = false
         generation = 0L
         currentSampleRate = initialSampleRate
         currentPlaybackSource = null
+        protectionActive = false
+        protectedSentenceIndex = -1
+        deferredOnline.clear()
         pcmChannel.close(); controlChannel.close()
         pcmChannel = Channel(queueCapacity)
         controlChannel = Channel(Channel.CONFLATED)
@@ -110,32 +123,79 @@ class AudioPlayer(
 
                         when (item) {
                             is QueueItem.Pcm -> {
+                                // 保护期：只播放“受保护句”的离线PCM；在线PCM顺序暂存
+                                if (protectionActive && item.sentenceIndex != protectedSentenceIndex) {
+                                    if (item.source == SynthesisMode.OFFLINE) {
+                                        Log.i(TAG, "保护期丢弃离线PCM：句子#${item.sentenceIndex} (受保护句为#${protectedSentenceIndex})")
+                                        return@onReceive
+                                    } else {
+                                        deferredOnline.addLast(item)
+                                        Log.i(TAG, "保护期暂存在线PCM：句子#${item.sentenceIndex}，deferred=${deferredOnline.size}")
+                                        return@onReceive
+                                    }
+                                }
+
+                                // 播放允许的数据
                                 if (audioTrack == null || item.sampleRate != currentSampleRate) {
+                                    // 只有真正开始播放新条目时才切轨；保护期内不会遇到采样率变化
                                     switchSampleRate(item.sampleRate)
                                 }
                                 if (currentPlaybackSource != item.source || audioTrack?.sampleRate != item.sampleRate) {
                                     currentPlaybackSource = item.source
-                                    Log.i(TAG, ">>> 开始播放来自 [${item.source}] 的音频 (采样率: ${item.sampleRate} Hz, 句子: ${item.sentenceIndex}) <<<")
+                                    Log.i(TAG, ">>> 开始播放 [${item.source}] (采样率: ${item.sampleRate} Hz, 句子: ${item.sentenceIndex}) <<<")
                                 }
                                 audioTrack?.play()
-                                // 核心修改：使用可中断的分块写入代替阻塞的整块写入
                                 writePcmInChunks(item)
                             }
                             is QueueItem.Marker -> {
+                                // 保护期：只触发“受保护句”的离线 Marker；在线 Marker 顺序暂存
+                                if (protectionActive && item.sentenceIndex != protectedSentenceIndex) {
+                                    if (item.source == SynthesisMode.OFFLINE) {
+                                        Log.i(TAG, "保护期丢弃离线Marker：句子#${item.sentenceIndex} type=${item.type}")
+                                        return@onReceive
+                                    } else {
+                                        deferredOnline.addLast(item)
+                                        Log.i(TAG, "保护期暂存在线Marker：句子#${item.sentenceIndex} type=${item.type}，deferred=${deferredOnline.size}")
+                                        return@onReceive
+                                    }
+                                }
+
                                 if (item.gen == generation) {
-                                    try {
-                                        withContext(Dispatchers.Default) { item.onReached?.invoke() }
-                                    } catch (t: Throwable) {
-                                        Log.w(TAG, "执行 Marker 回调时出错", t)
+                                    try { withContext(Dispatchers.Default) { item.onReached?.invoke() } }
+                                    catch (t: Throwable) { Log.w(TAG, "执行 Marker 回调时出错", t) }
+                                }
+
+                                // 若为受保护句的 END：等待缓冲排空 -> 结束保护期 -> 吐回在线暂存
+                                if (protectionActive && item.sentenceIndex == protectedSentenceIndex && item.type == MarkerType.SENTENCE_END) {
+                                    Log.i(TAG, "受保护句 #${item.sentenceIndex} 的 END 已到达，等待缓冲排空后结束保护期并吐回在线暂存。")
+                                    launch {
+                                        waitForPlaybackToFinish()
+                                        protectionActive = false
+                                        val ended = protectedSentenceIndex
+                                        protectedSentenceIndex = -1
+                                        val toFlush = deferredOnline.size
+                                        if (toFlush > 0) {
+                                            Log.i(TAG, "开始吐回 ${toFlush} 条在线暂存项（保持到达顺序）")
+                                            while (deferredOnline.isNotEmpty()) {
+                                                val d = deferredOnline.removeFirst()
+                                                // 刷回当前代次，避免被丢弃
+                                                when (d) {
+                                                    is QueueItem.Pcm -> pcmChannel.send(d.copy(gen = generation))
+                                                    is QueueItem.Marker -> pcmChannel.send(d.copy(gen = generation))
+                                                    is QueueItem.EndOfStream -> pcmChannel.send(d.copy(gen = generation))
+                                                }
+                                            }
+                                        }
+                                        Log.i(TAG, "保护期关闭。")
                                     }
                                 }
                             }
                             is QueueItem.EndOfStream -> {
-                                Log.i(TAG, "收到流结束(EOS)标记，将等待所有缓冲播放完毕后执行回调...")
+                                Log.i(TAG, "收到流结束(EOS)，等待缓冲播放完毕后回调...")
                                 launch {
                                     waitForPlaybackToFinish()
                                     if (item.gen == generation && !isStopped) {
-                                        Log.i(TAG, "音频缓冲已播放完毕。执行EOS回调。")
+                                        Log.i(TAG, "缓冲已播放完毕。执行EOS回调。")
                                         item.onDrained()
                                     }
                                 }
@@ -147,12 +207,16 @@ class AudioPlayer(
         } finally {
             releaseAudioTrack()
             isStopped = true
+            protectionActive = false
+            protectedSentenceIndex = -1
+            deferredOnline.clear()
         }
     }
 
     /**
-     * 统一处理所有控制命令（如重置）。
-     * 这个函数会更新代次(generation)，清空或部分清空队列，并根据需要重建 AudioTrack。
+     * 控制命令处理：
+     * - SOFT_QUEUE_ONLY：仅保留指定句子的队列项；开启保护期；清空在线暂存缓冲。
+     * - HARD：释放 AudioTrack 并结束保护期。
      */
     private suspend fun processControlCommand(control: Control) {
         Log.i(TAG, "正在处理控制命令: ${control.type}, 保留索引: ${control.preserveSentenceIndex}")
@@ -162,27 +226,32 @@ class AudioPlayer(
 
         if (control.preserveSentenceIndex != -1) {
             val newPcmChannel = Channel<QueueItem>(queueCapacity)
-            var preservedCount = 0
-            while(true) {
+            var preserved = 0
+            while (true) {
                 val item = pcmChannel.tryReceive().getOrNull() ?: break
-                val shouldPreserve = when(item) {
+                val keep = when (item) {
                     is QueueItem.Pcm -> item.sentenceIndex == control.preserveSentenceIndex
                     is QueueItem.Marker -> item.sentenceIndex == control.preserveSentenceIndex
                     else -> false
                 }
-                if (shouldPreserve) {
-                    val newItem = when(item) {
+                if (keep) {
+                    val updated = when (item) {
                         is QueueItem.Pcm -> item.copy(gen = newGeneration)
                         is QueueItem.Marker -> item.copy(gen = newGeneration)
                         else -> item
                     }
-                    newPcmChannel.trySend(newItem)
-                    preservedCount++
+                    newPcmChannel.trySend(updated)
+                    preserved++
                 }
             }
             pcmChannel.close()
             pcmChannel = newPcmChannel
-            Log.d(TAG, "队列已部分清空。保留并更新了 ${preservedCount} 个属于句子 ${control.preserveSentenceIndex} 的数据项。")
+
+            // 开启保护期
+            protectionActive = true
+            protectedSentenceIndex = control.preserveSentenceIndex
+            deferredOnline.clear()
+            Log.d(TAG, "进入保护期：仅允许句子 #${protectedSentenceIndex} 的离线数据。保留条目数=$preserved")
         } else {
             while (pcmChannel.tryReceive().isSuccess) { /* drain */ }
             Log.d(TAG, "PCM 队列已完全清空。")
@@ -190,32 +259,31 @@ class AudioPlayer(
 
         when (control.type) {
             ResetType.HARD -> {
-                Log.d(TAG, "执行硬重置：正在释放 AudioTrack...")
+                Log.d(TAG, "执行硬重置：释放 AudioTrack，退出保护期。")
                 releaseAudioTrack()
                 currentPlaybackSource = null
+                protectionActive = false
+                protectedSentenceIndex = -1
+                deferredOnline.clear()
             }
             ResetType.SOFT_QUEUE_ONLY -> {
-                Log.d(TAG, "执行软重置：仅清空队列，保留 AudioTrack。")
+                Log.d(TAG, "执行软重置：仅清空队列(保留指定句)，已进入保护期。")
             }
         }
         control.ack?.complete(Unit)
     }
 
     /**
-     * 核心修复：以可中断的方式分块写入 PCM 数据。
-     *
-     * 在写入每个小数据块之前，此函数会检查 `controlChannel` 中是否有新的命令。
-     * 如果检测到命令（例如 `stop` 导致的 `reset`），它会立即停止写入当前音频，
-     * 并处理该命令，从而实现对外部控制的即时响应。
+     * 分块写入 PCM，处理控制命令：
+     * - HARD：立即中断。
+     * - SOFT_QUEUE_ONLY：若保留的是当前句，允许跨代次写完本块，避免断句；否则中断本块以尽快切换。
      */
     private suspend fun writePcmInChunks(item: QueueItem.Pcm) {
         val at = audioTrack ?: return
         var written = 0
-        // 若在本块中处理了“保当前句”的软重置，允许忽略代次变化以继续写完本块
         var allowContinueAcrossGenBump = false
 
         while (written < item.length) {
-            // 1) 每个小块前检查控制命令
             val control = controlChannel.tryReceive().getOrNull()
             if (control != null) {
                 val isHard = control.type == ResetType.HARD
@@ -228,49 +296,29 @@ class AudioPlayer(
                             "currentSentence=${item.sentenceIndex}, written=$written/${item.length}"
                 )
 
-                // 处理命令（完成代次切换/保留/清队等，同时会完成 ack）
                 processControlCommand(control)
 
                 if (isHard) {
-                    // 强制停止：立即中断
                     Log.w(TAG, "检测到硬重置(HARD)，立即中断当前 PCM 写入。")
                     return
                 }
-
                 if (isSoft && preservesCurrent) {
-                    // 这是“升级在线、保留当前句”的典型场景：继续把本块写完，避免断句
                     allowContinueAcrossGenBump = true
-                    Log.d(
-                        TAG,
-                        "已处理软重置且保留当前句，允许跨代次继续完成本 PCM 块写入，避免截断。"
-                    )
-                    // 注意：此后 item.gen 可能和 generation 不一致，但本块内允许继续
-                } else {
-                    // 未保留当前句（或其它软命令）：为保证快速切换，仍然中断当前块
-                    Log.w(
-                        TAG,
-                        "收到软重置但未保留当前句，为提升响应速度，中断本 PCM 块写入。"
-                    )
+                    Log.d(TAG, "软重置(保当前句)，允许跨代次写完本块避免截断。")
+                } else if (isSoft) {
+                    Log.w(TAG, "软重置(非当前句)，中断本 PCM 块以尽快切换。")
                     return
                 }
             }
 
-            // 2) 协程/播放器状态检查；若代次变化且未允许跨代次写完，则中断
             if (!coroutineContext.isActive || isStopped || (item.gen != generation && !allowContinueAcrossGenBump)) {
-                Log.d(
-                    TAG,
-                    "写入中检测到状态/代次变化(allowAcrossGen=$allowContinueAcrossGenBump)，中断本 PCM 块写入。"
-                )
+                Log.d(TAG, "写入PCM时状态/代次变化(allowAcrossGen=$allowContinueAcrossGenBump)，中断写入。")
                 return
             }
 
-            // 3) 暂停等待
             while (isPaused && coroutineContext.isActive && !isStopped) { delay(10) }
 
-            // 4) 计算本次写入的分块大小
             val toWrite = (item.length - written).coerceAtMost(WRITE_CHUNK_SIZE)
-
-            // 5) 写入
             val result = at.write(item.data, item.offset + written, toWrite)
             if (result > 0) {
                 written += result
@@ -285,23 +333,12 @@ class AudioPlayer(
         val track = audioTrack ?: return
         Log.d(TAG, "开始监视播放缓冲区排空...")
         try {
-            var lastPosition = -1; var stallCount = 0; val MAX_STALLS = 50
+            var last = -1; var stall = 0; val MAX_STALLS = 50
             while (coroutineContext.isActive && !isStopped) {
-                if (track.playState != AudioTrack.PLAYSTATE_PLAYING) {
-                    Log.d(TAG, "AudioTrack 不在播放状态，停止监视。")
-                    break
-                }
-                val currentPosition = track.playbackHeadPosition
-                if (lastPosition == -1 || currentPosition > lastPosition) {
-                    stallCount = 0
-                    lastPosition = currentPosition
-                } else {
-                    stallCount++
-                }
-                if (stallCount > MAX_STALLS) {
-                    Log.d(TAG, "播放头位置长时间未改变 ($currentPosition)，认为播放结束。")
-                    break
-                }
+                if (track.playState != AudioTrack.PLAYSTATE_PLAYING) break
+                val pos = track.playbackHeadPosition
+                if (last == -1 || pos > last) { stall = 0; last = pos } else { stall++ }
+                if (stall > MAX_STALLS) break
                 delay(20)
             }
         } catch (e: Exception) { Log.e(TAG, "等待播放完成时出错", e) }
@@ -322,7 +359,8 @@ class AudioPlayer(
 
     private fun createAudioTrack(sampleRate: Int): AudioTrack? {
         return try {
-            val channelConfig = AudioFormat.CHANNEL_OUT_MONO; val audioFormat = AudioFormat.ENCODING_PCM_16BIT
+            val channelConfig = AudioFormat.CHANNEL_OUT_MONO
+            val audioFormat = AudioFormat.ENCODING_PCM_16BIT
             val minBufferSize = AudioTrack.getMinBufferSize(sampleRate, channelConfig, audioFormat)
             if (minBufferSize <= 0) {
                 Log.e(TAG, "无效的最小缓冲区大小: $minBufferSize @ $sampleRate Hz")
@@ -330,15 +368,21 @@ class AudioPlayer(
             }
             val bufferSizeBytes = (minBufferSize * 2).coerceAtLeast(minBufferSize)
             Log.d(TAG, "创建 AudioTrack: 采样率=$sampleRate Hz, 缓冲区大小=$bufferSizeBytes 字节")
-            AudioTrack(AudioManager.STREAM_MUSIC, sampleRate, channelConfig, audioFormat, bufferSizeBytes, AudioTrack.MODE_STREAM)
-                .also { at ->
-                    if (at.state != AudioTrack.STATE_INITIALIZED) {
-                        Log.e(TAG, "AudioTrack 初始化失败，状态: ${at.state}")
-                        at.release()
-                        return null
-                    }
-                    at.setStereoVolume(currentVolume, currentVolume)
+            AudioTrack(
+                AudioManager.STREAM_MUSIC,
+                sampleRate,
+                channelConfig,
+                audioFormat,
+                bufferSizeBytes,
+                AudioTrack.MODE_STREAM
+            ).also { at ->
+                if (at.state != AudioTrack.STATE_INITIALIZED) {
+                    Log.e(TAG, "AudioTrack 初始化失败，状态: ${at.state}")
+                    at.release()
+                    return null
                 }
+                at.setStereoVolume(currentVolume, currentVolume)
+            }
         } catch (e: Exception) { Log.e(TAG, "创建 AudioTrack 时出错", e); null }
     }
 
@@ -365,22 +409,64 @@ class AudioPlayer(
         Log.d(TAG, "播放器已确认[硬重置]完成。")
     }
 
+    /**
+     * 软重置：仅清队列，保留指定句，并进入保护期。
+     */
     suspend fun resetQueueOnlyBlocking(preserveSentenceIndex: Int) {
         if (isStopped || playbackJob?.isActive != true) return
         val ack = CompletableDeferred<Unit>()
         controlChannel.send(Control(ResetType.SOFT_QUEUE_ONLY, ack, preserveSentenceIndex))
         ack.await()
-        Log.d(TAG, "播放器已确认[软重置]完成，并尝试保留句子 $preserveSentenceIndex 的数据。")
+        Log.d(TAG, "播放器已确认[软重置]完成，进入保护期：仅允许句子 #$preserveSentenceIndex 的离线数据。")
     }
 
-    suspend fun enqueuePcm(pcm: ShortArray, offset: Int = 0, length: Int = pcm.size, sampleRate: Int, source: SynthesisMode, sentenceIndex: Int) {
+    /**
+     * 入队 PCM：
+     * - 保护期内直接丢弃“非受保护句”的离线 PCM，杜绝升级窗口污染；
+     * - 在线 PCM 始终接收（在消费端按需要暂存）。
+     */
+    suspend fun enqueuePcm(
+        pcm: ShortArray,
+        offset: Int = 0,
+        length: Int = pcm.size,
+        sampleRate: Int,
+        source: SynthesisMode,
+        sentenceIndex: Int
+    ) {
         if (isStopped || length <= 0) return
+        if (protectionActive && source == SynthesisMode.OFFLINE && sentenceIndex != protectedSentenceIndex) {
+            Log.i(TAG, "保护期丢弃入队的离线PCM：句子#$sentenceIndex (受保护句为#$protectedSentenceIndex)")
+            return
+        }
         pcmChannel.send(QueueItem.Pcm(generation, pcm, offset, length, sampleRate, source, sentenceIndex))
     }
 
-    suspend fun enqueueMarker(sentenceIndex: Int, type: MarkerType, onReached: (() -> Unit)? = null) {
+    /**
+     * 入队 Marker（带来源）：
+     * - 保护期内丢弃“非受保护句”的离线 Marker，防止错误回调；
+     * - 在线 Marker 始终接收（在消费端按需要暂存）。
+     */
+    suspend fun enqueueMarker(
+        sentenceIndex: Int,
+        type: MarkerType,
+        source: SynthesisMode,
+        onReached: (() -> Unit)? = null
+    ) {
         if (isStopped) return
-        pcmChannel.send(QueueItem.Marker(generation, sentenceIndex, type, onReached))
+        if (protectionActive && source == SynthesisMode.OFFLINE && sentenceIndex != protectedSentenceIndex) {
+            Log.i(TAG, "保护期丢弃入队的离线Marker：句子#$sentenceIndex type=$type")
+            return
+        }
+        pcmChannel.send(QueueItem.Marker(generation, sentenceIndex, type, source, onReached))
+    }
+
+    /**
+     * 兼容旧签名（无来源）。为避免误判，默认按 ONLINE 处理（即不会被丢弃，只会在保护期内暂存）。
+     * 推荐尽快切到带 source 的重载，以便在保护期内正确丢弃“非受保护”的离线 Marker。
+     */
+    @Deprecated("Use enqueueMarker(sentenceIndex, type, source, onReached)")
+    suspend fun enqueueMarker(sentenceIndex: Int, type: MarkerType, onReached: (() -> Unit)? = null) {
+        enqueueMarker(sentenceIndex, type, SynthesisMode.ONLINE, onReached)
     }
 
     suspend fun enqueueEndOfStream(onDrained: () -> Unit) {
@@ -411,6 +497,9 @@ class AudioPlayer(
         if (isStopped) return
         val jobToJoin = playbackJob
         isStopped = true; isPaused = false
+        protectionActive = false
+        protectedSentenceIndex = -1
+        deferredOnline.clear()
         controlChannel.close(); pcmChannel.close()
         jobToJoin?.cancelAndJoin()
         playbackJob = null

@@ -373,36 +373,34 @@ class TtsSynthesizer(
             val mp3Data = onlineApi.fetchTtsAudio(sentence, currentSpeaker)
             if (!coroutineContext.isActive) return SynthesisResult.Failure("协程被取消")
             if (mp3Data.isEmpty()) {
-                val reason = "在线API返回了空的音频数据"
+                val reason = "在线API返回空音频"
                 Log.e(TAG, "$reason, 句子: \"$sentence\"")
                 return SynthesisResult.Failure(reason)
             }
-            val decodedResult = mp3Decoder.decode(mp3Data)
-            val pcmData = decodedResult.pcmData
-            val sampleRate = decodedResult.sampleRate
+            val decoded = mp3Decoder.decode(mp3Data)
+            val pcmData = decoded.pcmData
+            val sampleRate = decoded.sampleRate
             if (!coroutineContext.isActive) return SynthesisResult.Failure("协程被取消")
 
-            val startCallback = { sendCommand(Command.InternalSentenceStart(index, sentence)) }
-            val endCallback = { sendCommand(Command.InternalSentenceEnd(index, sentence)) }
+            val startCb = { sendCommand(Command.InternalSentenceStart(index, sentence)) }
+            val endCb = { sendCommand(Command.InternalSentenceEnd(index, sentence)) }
 
             if (pcmData.isEmpty()) {
-                Log.w(TAG, "MP3解码后得到空的PCM数据: \"$sentence\"")
-                audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_START, startCallback)
-                audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_END, endCallback)
+                audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.ONLINE, startCb)
+                audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_END, SynthesisMode.ONLINE, endCb)
                 return SynthesisResult.Success
             }
 
-            audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_START, startCallback)
+            audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.ONLINE, startCb)
             audioPlayer.enqueuePcm(pcm = pcmData, sampleRate = sampleRate, source = SynthesisMode.ONLINE, sentenceIndex = index)
-            audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_END, endCallback)
-
+            audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_END, SynthesisMode.ONLINE, endCb)
             return SynthesisResult.Success
         } catch (e: IOException) {
-            val reason = "在线合成网络或IO错误 (句子 $index): ${e.message}"
+            val reason = "在线合成IO错误 (句子 $index): ${e.message}"
             Log.e(TAG, reason)
             return SynthesisResult.Failure(reason)
         } catch (e: Exception) {
-            val reason = "在线合成或解码时发生意外错误 (句子 $index): ${e.message}"
+            val reason = "在线合成或解码异常 (句子 $index): ${e.message}"
             Log.e(TAG, reason, e)
             return SynthesisResult.Failure(reason)
         }
@@ -412,51 +410,51 @@ class TtsSynthesizer(
         return engineMutex.withLock {
             try {
                 Log.d(TAG, "正在合成[离线]句子 $index: \"$sentence\"")
-                val prepareResult = prepareForSynthesis(sentence, currentSpeed, currentVolume)
-                if (prepareResult != 0) {
-                    val reason = "离线引擎准备失败 (代码: $prepareResult)，句子: $sentence"
+                val prepare = prepareForSynthesis(sentence, currentSpeed, currentVolume)
+                if (prepare != 0) {
+                    val reason = "离线引擎准备失败 (code=$prepare) 句子: $sentence"
                     Log.e(TAG, reason)
                     return@withLock SynthesisResult.Failure(reason)
                 }
 
-                val startCallback = { sendCommand(Command.InternalSentenceStart(index, sentence)) }
-                val endCallback = { sendCommand(Command.InternalSentenceEnd(index, sentence)) }
+                val startCb = { sendCommand(Command.InternalSentenceStart(index, sentence)) }
+                val endCb = { sendCommand(Command.InternalSentenceEnd(index, sentence)) }
 
                 val synthResult = IntArray(1)
                 val pcmArray = pcmBuffer.array()
-                var hasEnqueuedStartMarker = false
+                var hasStart = false
                 while (coroutineContext.isActive) {
-                    val synthesisStatus = nativeEngine?.synthesize(pcmArray, TtsConstants.PCM_BUFFER_SIZE, synthResult, 1) ?: -1
-                    if (synthesisStatus == -1) {
+                    val status = nativeEngine?.synthesize(pcmArray, TtsConstants.PCM_BUFFER_SIZE, synthResult, 1) ?: -1
+                    if (status == -1) {
                         val reason = "本地合成失败，状态码: -1"
                         Log.e(TAG, reason)
                         nativeEngine?.reset()
                         return@withLock SynthesisResult.Failure(reason)
                     }
-                    val numSamples = synthResult[0]
-                    if (numSamples <= 0) break
-                    if (!hasEnqueuedStartMarker) {
-                        audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_START, startCallback)
-                        hasEnqueuedStartMarker = true
+                    val num = synthResult[0]
+                    if (num <= 0) break
+                    if (!hasStart) {
+                        audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.OFFLINE, startCb)
+                        hasStart = true
                     }
-                    val validSamples = numSamples.coerceAtMost(pcmArray.size)
-                    if (validSamples > 0) {
-                        val validPcm = pcmArray.copyOf(validSamples)
-                        audioPlayer.enqueuePcm(pcm = validPcm, sampleRate = TtsConstants.DEFAULT_SAMPLE_RATE, source = SynthesisMode.OFFLINE, sentenceIndex = index)
+                    val valid = num.coerceAtMost(pcmArray.size)
+                    if (valid > 0) {
+                        val chunk = pcmArray.copyOf(valid)
+                        audioPlayer.enqueuePcm(pcm = chunk, sampleRate = TtsConstants.DEFAULT_SAMPLE_RATE, source = SynthesisMode.OFFLINE, sentenceIndex = index)
                     }
-                    delay(1) // 让出CPU，防止紧密循环
+                    delay(1)
                 }
                 if (coroutineContext.isActive) {
-                    if (!hasEnqueuedStartMarker) {
-                        audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_START, startCallback)
+                    if (!hasStart) {
+                        audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.OFFLINE, startCb)
                     }
-                    audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_END, endCallback)
+                    audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_END, SynthesisMode.OFFLINE, endCb)
                 }
                 SynthesisResult.Success
             } catch (e: CancellationException) {
                 SynthesisResult.Failure("协程被取消")
             } catch (e: Exception) {
-                val reason = "离线合成时发生异常: ${e.message}"
+                val reason = "离线合成异常: ${e.message}"
                 Log.e(TAG, reason, e)
                 SynthesisResult.Failure(reason)
             } finally {
