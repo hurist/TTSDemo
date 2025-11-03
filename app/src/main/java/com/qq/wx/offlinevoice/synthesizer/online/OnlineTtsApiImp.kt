@@ -60,12 +60,15 @@ object WxReaderApi : OnlineTtsApi {
                         if (audioData != null) {
                             ctx.resumeWith(Result.success(audioData))
                         } else {
+                            Log.e(TAG, "音频数据解析失败:$responseBody")
                             ctx.resumeWith(Result.failure(IOException("音频数据解析失败")))
                         }
                     } else {
+                        Log.e(TAG, "响应体为空:$response")
                         ctx.resumeWith(Result.failure(IOException("响应体为空")))
                     }
                 } else {
+                    Log.e(TAG, "网络请求失败，状态码: ${response.code}")
                     ctx.resumeWith(Result.failure(IOException("网络请求失败，状态码: ${response.code}")))
                 }
             }
