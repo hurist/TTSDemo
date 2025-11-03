@@ -1,6 +1,6 @@
 package com.hurist.ttsdemo
 
-import com.qq.wx.offlinevoice.synthesizer.SentenceSplitter
+import com.qq.wx.offlinevoice.synthesizer.SentenceSplitter1
 import org.junit.Test
 import org.junit.Assert.*
 
@@ -12,7 +12,7 @@ class SentenceSplitterTest {
     @Test
     fun testSplitSimpleChinese() {
         val text = "这是第一句。这是第二句！这是第三句？"
-        val sentences = SentenceSplitter.splitIntoSentences(text)
+        val sentences = SentenceSplitter1.splitIntoSentences(text)
         
         assertEquals(3, sentences.size)
         assertEquals("这是第一句", sentences[0])
@@ -23,7 +23,7 @@ class SentenceSplitterTest {
     @Test
     fun testSplitWithDelimiters() {
         val text = "第一句。第二句！第三句？"
-        val sentences = SentenceSplitter.splitWithDelimiters(text)
+        val sentences = SentenceSplitter1.splitWithDelimiters(text)
         
         assertEquals(3, sentences.size)
         assertEquals("第一句。", sentences[0])
@@ -34,7 +34,7 @@ class SentenceSplitterTest {
     @Test
     fun testSplitEnglish() {
         val text = "This is first. This is second! This is third?"
-        val sentences = SentenceSplitter.splitIntoSentences(text)
+        val sentences = SentenceSplitter1.splitIntoSentences(text)
         
         assertEquals(3, sentences.size)
         assertTrue(sentences[0].contains("first"))
@@ -45,7 +45,7 @@ class SentenceSplitterTest {
     @Test
     fun testSplitMultipleDelimiters() {
         val text = "句子一。。句子二！！！句子三？？"
-        val sentences = SentenceSplitter.splitIntoSentences(text)
+        val sentences = SentenceSplitter1.splitIntoSentences(text)
         
         assertEquals(3, sentences.size)
     }
@@ -53,27 +53,27 @@ class SentenceSplitterTest {
     @Test
     fun testSplitWithSemicolon() {
         val text = "部分一；部分二；部分三"
-        val sentences = SentenceSplitter.splitIntoSentences(text)
+        val sentences = SentenceSplitter1.splitIntoSentences(text)
         
         assertEquals(3, sentences.size)
     }
     
     @Test
     fun testEmptyText() {
-        val sentences = SentenceSplitter.splitIntoSentences("")
+        val sentences = SentenceSplitter1.splitIntoSentences("")
         assertTrue(sentences.isEmpty())
     }
     
     @Test
     fun testWhitespaceOnly() {
-        val sentences = SentenceSplitter.splitIntoSentences("   ")
+        val sentences = SentenceSplitter1.splitIntoSentences("   ")
         assertTrue(sentences.isEmpty())
     }
     
     @Test
     fun testNoDelimiters() {
         val text = "这是一段没有分隔符的文本"
-        val sentences = SentenceSplitter.splitIntoSentences(text)
+        val sentences = SentenceSplitter1.splitIntoSentences(text)
         
         // Should return the whole text as one sentence (or empty if no delimiters)
         // Depending on implementation
@@ -82,7 +82,7 @@ class SentenceSplitterTest {
     @Test
     fun testMixedLanguage() {
         val text = "Hello world. 你好世界！How are you? 你好吗？"
-        val sentences = SentenceSplitter.splitIntoSentences(text)
+        val sentences = SentenceSplitter1.splitIntoSentences(text)
         
         assertTrue(sentences.size >= 2)
     }
@@ -94,7 +94,7 @@ class SentenceSplitterTest {
             这是第二段。也有多个句子！对吧？
         """.trimIndent()
         
-        val sentences = SentenceSplitter.splitIntoSentences(text)
+        val sentences = SentenceSplitter1.splitIntoSentences(text)
         assertTrue(sentences.size >= 4)
     }
     
@@ -102,7 +102,7 @@ class SentenceSplitterTest {
     fun testMinimumLength() {
         // Test that very short fragments are filtered out
         val text = "长句子。a.另一个长句子"
-        val sentences = SentenceSplitter.splitIntoSentences(text)
+        val sentences = SentenceSplitter1.splitIntoSentences(text)
         
         // Should not include single character "a"
         assertTrue(sentences.all { it.length >= 2 })

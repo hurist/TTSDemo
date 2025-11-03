@@ -167,8 +167,8 @@ class MainActivity : AppCompatActivity() {
             
             “别等我，我已经在回来的路上。”
             
-            ——
-            他笑了。
+            --
+            他笑了——
             “真像她的风格。”
             
             电脑屏幕自动亮起，桌面的时间跳到 22:07:45。
@@ -271,7 +271,7 @@ class MainActivity : AppCompatActivity() {
             雨，还没停。""".trimIndent()
 
         // 设置默认文本
-        editTextInput.setText(content1)
+        editTextInput.setText(content)
 
         // 设置语速滑动条 (0.5x到3.0x，步进0.1，默认1.0x)
         // SeekBar范围: 0-25，映射到0.5-3.0

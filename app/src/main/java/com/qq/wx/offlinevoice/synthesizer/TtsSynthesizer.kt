@@ -86,6 +86,7 @@ class TtsSynthesizer(
     private var isPausedByError = false
     private var onlineAudioProcessor: AudioSpeedProcessor? = null
     private val processorMutex = Mutex()
+    private val splitterStrategy = SentenceSplitterStrategy.PUNCTUATION
 
     companion object {
         private const val TAG = "TtsSynthesizer"
@@ -182,7 +183,12 @@ class TtsSynthesizer(
         }
         isPausedByError = false
         sentences.clear()
-        sentences.addAll(SentenceSplitter.splitWithDelimiters(text))
+
+        val result = when(splitterStrategy) {
+            SentenceSplitterStrategy.NEWLINE -> SentenceSplitter.sentenceSplitListByLine(text)
+            SentenceSplitterStrategy.PUNCTUATION -> SentenceSplitter.sentenceSplitList(text)
+        }
+        sentences.addAll(result)
         if (sentences.isEmpty()) {
             Log.w(TAG, "提供的文本中未找到有效句子。")
             currentCallback?.onError("文本中没有有效的句子")
@@ -415,6 +421,10 @@ class TtsSynthesizer(
 
     private suspend fun performOnlineSynthesis(index: Int, sentence: String): SynthesisResult {
         try {
+            if (sentence.trim().isEmpty()) {
+                Log.w(TAG, "句子 $index 内容为空，跳过在线合成。")
+                return SynthesisResult.Success
+            }
             Log.d(TAG, "正在合成[在线]句子 $index: \"$sentence\"")
             val mp3Data = onlineApi.fetchTtsAudio(sentence, currentSpeaker)
             if (!coroutineContext.isActive) return SynthesisResult.Failure("协程被取消")
@@ -470,12 +480,17 @@ class TtsSynthesizer(
     private suspend fun performOfflineSynthesis(index: Int, sentence: String): SynthesisResult {
         return engineMutex.withLock {
             try {
+                if (sentence.trim().isEmpty()) {
+                    Log.w(TAG, "句子 $index 内容为空，跳过离线合成。")
+                    return SynthesisResult.Success
+                }
                 Log.d(TAG, "正在合成[离线]句子 $index: \"$sentence\"")
                 val prepare = prepareForSynthesis(sentence, currentSpeed, currentVolume)
                 if (prepare != 0) {
                     val reason = "离线引擎准备失败 (code=$prepare) 句子: $sentence"
                     Log.e(TAG, reason)
-                    return@withLock SynthesisResult.Failure(reason)
+                    //return@withLock SynthesisResult.Failure(reason)
+                    return@withLock SynthesisResult.Success
                 }
 
                 val startCb = { sendCommand(Command.InternalSentenceStart(index, sentence)) }
@@ -489,8 +504,9 @@ class TtsSynthesizer(
                     if (status == -1) {
                         val reason = "本地合成失败，状态码: -1"
                         Log.e(TAG, reason)
-                        nativeEngine?.reset()
-                        return@withLock SynthesisResult.Failure(reason)
+                        //nativeEngine?.reset()
+                        //return@withLock SynthesisResult.Failure(reason)
+                        return SynthesisResult.Success
                     }
                     val num = synthResult[0]
                     if (num <= 0) break
