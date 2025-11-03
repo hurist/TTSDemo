@@ -84,6 +84,8 @@ class TtsSynthesizer(
     private val audioPlayer: AudioPlayer = AudioPlayer(initialSampleRate = TtsConstants.DEFAULT_SAMPLE_RATE)
     private val engineMutex = Mutex()
     private var isPausedByError = false
+    private var onlineAudioProcessor: AudioSpeedProcessor? = null
+    private val processorMutex = Mutex()
 
     companion object {
         private const val TAG = "TtsSynthesizer"
@@ -188,13 +190,29 @@ class TtsSynthesizer(
         }
         playingSentenceIndex = 0
         synthesisSentenceIndex = 0
+
+        processorMutex.withLock {
+            onlineAudioProcessor?.release()
+            onlineAudioProcessor = null
+        }
+
         audioPlayer.startIfNeeded(volume = currentVolume)
         updateState(TtsPlaybackState.PLAYING)
         currentCallback?.onSynthesisStart()
         startSynthesis()
     }
 
-    private suspend fun handleSetSpeed(speed: Float) { val newSpeed = speed.coerceIn(0.5f, 3.0f); if (currentSpeed == newSpeed) return; currentSpeed = newSpeed; if (currentState == TtsPlaybackState.PLAYING) { softRestart() } }
+    private suspend fun handleSetSpeed(speed: Float) {
+        val newSpeed = speed.coerceIn(0.5f, 3.0f)
+        if (currentSpeed == newSpeed) return
+        currentSpeed = newSpeed
+        processorMutex.withLock {
+            onlineAudioProcessor?.setSpeed(newSpeed)
+        }
+        if (currentState == TtsPlaybackState.PLAYING) {
+            softRestart()
+        }
+    }
     private suspend fun handleSetSpeaker(speaker: Speaker) { if (speaker == currentSpeaker) return; currentSpeaker = speaker; if (currentState == TtsPlaybackState.PLAYING) { softRestart() } }
     private fun handleSetVolume(volume: Float) { val newVolume = volume.coerceIn(0.0f, 1.0f); if (currentVolume == newVolume) return; currentVolume = newVolume; audioPlayer.setVolume(newVolume) }
 
@@ -259,6 +277,11 @@ class TtsSynthesizer(
         jobToJoin?.join()
         Log.d(TAG, "已确认合成任务完全终止。")
 
+        processorMutex.withLock {
+            onlineAudioProcessor?.release()
+            onlineAudioProcessor = null
+        }
+
         sentences.clear()
         updateState(TtsPlaybackState.IDLE)
         Log.d(TAG, "handleStop 执行完毕。")
@@ -317,6 +340,29 @@ class TtsSynthesizer(
                     } catch (e: CancellationException) {
                         Log.d(TAG, "合成循环被取消。")
                     } finally {
+                        var finalPcm: ShortArray? = null
+                        var finalSampleRate: Int? = null
+                        processorMutex.withLock {
+                            if (onlineAudioProcessor != null) {
+                                finalPcm = onlineAudioProcessor?.flush()
+                                finalSampleRate = onlineAudioProcessor?.sampleRate
+                                Log.d(TAG, "Flushing audio processor, got ${finalPcm?.size ?: 0} final samples.")
+                            }
+                        }
+
+                        val pcmToEnqueue = finalPcm
+                        if (pcmToEnqueue != null && pcmToEnqueue.isNotEmpty() && finalSampleRate != null) {
+                            val lastIndex = (synthesisSentenceIndex - 1).coerceAtLeast(0)
+                            audioPlayer.enqueuePcm(
+                                pcm = pcmToEnqueue,
+                                offset = 0,
+                                length = pcmToEnqueue.size,
+                                sampleRate = finalSampleRate!!,
+                                source = SynthesisMode.ONLINE,
+                                sentenceIndex = lastIndex
+                            )
+                        }
+
                         if (coroutineContext.isActive) {
                             Log.i(TAG, "合成循环结束。向播放器发送流结束(EOS)标记。是否因失败而结束: $synthesisFailed")
                             audioPlayer.enqueueEndOfStream {
@@ -392,7 +438,22 @@ class TtsSynthesizer(
             }
 
             audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.ONLINE, startCb)
-            audioPlayer.enqueuePcm(pcm = pcmData, sampleRate = sampleRate, source = SynthesisMode.ONLINE, sentenceIndex = index)
+
+            processorMutex.withLock {
+                if (onlineAudioProcessor == null || onlineAudioProcessor?.sampleRate != sampleRate) {
+                    onlineAudioProcessor?.release()
+                    onlineAudioProcessor = AudioSpeedProcessor(sampleRate)
+                    onlineAudioProcessor?.setSpeed(currentSpeed)
+                    Log.i(TAG, "Online audio sample rate is $sampleRate, created new AudioSpeedProcessor.")
+                }
+
+                val speedAdjustedPcm = onlineAudioProcessor?.process(pcmData) ?: pcmData
+
+                if (speedAdjustedPcm.isNotEmpty()) {
+                    audioPlayer.enqueuePcm(pcm = speedAdjustedPcm, sampleRate = sampleRate, source = SynthesisMode.ONLINE, sentenceIndex = index)
+                }
+            }
+
             audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_END, SynthesisMode.ONLINE, endCb)
             return SynthesisResult.Success
         } catch (e: IOException) {
