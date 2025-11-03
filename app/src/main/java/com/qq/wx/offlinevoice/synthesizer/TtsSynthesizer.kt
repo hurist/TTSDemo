@@ -212,9 +212,9 @@ class TtsSynthesizer(
     private suspend fun handleStop() {
         if (currentState == TtsPlaybackState.IDLE) return
         isPausedByError = false
-        audioPlayer.resetBlocking()
         synthesisJob?.cancelAndJoin()
         synthesisJob = null
+        audioPlayer.resetBlocking()
         sentences.clear()
         updateState(TtsPlaybackState.IDLE)
     }
