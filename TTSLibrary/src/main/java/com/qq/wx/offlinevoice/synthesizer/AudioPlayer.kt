@@ -32,6 +32,10 @@ import kotlin.coroutines.coroutineContext
  * 额外暴露状态查询：
  * - canAccept(source, sentenceIndex): 便于上层在保护期内对“非受保护句离线回退”进行延后（返回 Deferred），避免“成功但被丢弃”推进索引。
  * - isInProtection / getProtectedSentenceIndex：便于上层进行策略判定与日志。
+ *
+ * 暂停/恢复可靠性修复：
+ * - 暂停状态下“不再从 PCM 队列取数据”，而是“只消费控制命令”，确保 resetBlocking/软重置能即时生效，避免 ack 卡死导致恢复失败。
+ * - 写 PCM 的过程中仍支持暂停与控制命令抢占（writePcmInChunks 内已有处理）。
  */
 class AudioPlayer(
     private val initialSampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE,
@@ -129,6 +133,27 @@ class AudioPlayer(
         audioTrack = null
         try {
             while (isActive && !isStopped) {
+
+                // 1) 优先处理控制命令：先尝试非阻塞地拉取一次
+                controlChannel.tryReceive().getOrNull()?.let { control ->
+                    processControlCommand(control)
+                    continue
+                }
+
+                // 2) 若处于暂停态：只处理控制命令，不消费 PCM 队列，避免卡死 reset/soft reset 的 ack
+                if (isPaused) {
+                    // 为了响应及时，这里仍周期性探测控制通道
+                    val ctrl = controlChannel.tryReceive().getOrNull()
+                    if (ctrl != null) {
+                        processControlCommand(ctrl)
+                    } else {
+                        Log.v(TAG, "暂停中：仅处理控制命令，PCM 暂不消费。")
+                        delay(10)
+                    }
+                    continue
+                }
+
+                // 3) 正常态：监听控制与 PCM/Marker 两个通道
                 select<Unit> {
                     controlChannel.onReceive { control ->
                         processControlCommand(control)
@@ -138,7 +163,6 @@ class AudioPlayer(
                             Log.v(TAG, "丢弃旧代次(${item.gen})的数据，当前代次为 $generation")
                             return@onReceive
                         }
-                        while (isPaused && isActive && !isStopped && item.gen == generation) { delay(10) }
                         if (!isActive || isStopped || item.gen != generation) return@onReceive
 
                         when (item) {
@@ -196,7 +220,6 @@ class AudioPlayer(
                                     launch {
                                         waitForPlaybackToFinish()
                                         protectionActive = false
-                                        val ended = protectedSentenceIndex
                                         protectedSentenceIndex = -1
                                         val toFlushBuckets = deferredOnline.size
                                         if (toFlushBuckets > 0) {
@@ -328,6 +351,7 @@ class AudioPlayer(
      * 分块写入 PCM，处理控制命令：
      * - HARD：立即中断。
      * - SOFT_QUEUE_ONLY：若保留的是当前句，允许跨代次写完本块，避免断句；否则中断本块以尽快切换。
+     * - 支持暂停：在写入循环内检测 isPaused，并允许控制命令抢占，避免暂停期间的硬/软重置被卡住。
      */
     private suspend fun writePcmInChunks(item: QueueItem.Pcm) {
         val at = audioTrack ?: return
@@ -335,8 +359,8 @@ class AudioPlayer(
         var allowContinueAcrossGenBump = false
 
         while (written < item.length) {
-            val control = controlChannel.tryReceive().getOrNull()
-            if (control != null) {
+            // 控制命令抢占
+            controlChannel.tryReceive().getOrNull()?.let { control ->
                 val isHard = control.type == ResetType.HARD
                 val isSoft = control.type == ResetType.SOFT_QUEUE_ONLY
                 val preservesCurrent = control.preserveSentenceIndex == item.sentenceIndex
@@ -367,7 +391,16 @@ class AudioPlayer(
                 return
             }
 
-            while (isPaused && coroutineContext.isActive && !isStopped) { delay(10) }
+            // 暂停处理：暂停期间不继续写入，但仍允许上面的控制命令抢占
+            while (isPaused && coroutineContext.isActive && !isStopped) {
+                delay(10)
+                // 循环内再次尝试抢占控制命令
+                controlChannel.tryReceive().getOrNull()?.let { processControlCommand(it) }
+                if (item.gen != generation && !allowContinueAcrossGenBump) {
+                    Log.d(TAG, "暂停等待中检测到代次变化，结束写入。")
+                    return
+                }
+            }
 
             val toWrite = (item.length - written).coerceAtMost(WRITE_CHUNK_SIZE)
             val result = at.write(item.data, item.offset + written, toWrite)
@@ -534,14 +567,16 @@ class AudioPlayer(
     fun pause() {
         if (!isStopped && !isPaused) {
             isPaused = true
-            runCatching { audioTrack?.pause() }; Log.d(TAG, "音频已暂停 (用户操作)。")
+            runCatching { audioTrack?.pause() }
+            Log.d(TAG, "音频已暂停 (用户操作)。")
         }
     }
 
     fun resume() {
         if (!isStopped && isPaused) {
             isPaused = false
-            runCatching { audioTrack?.play() }; Log.d(TAG, "音频已恢复 (用户操作)。")
+            runCatching { audioTrack?.play() }
+            Log.d(TAG, "音频已恢复 (用户操作)。")
         }
     }
 
@@ -558,7 +593,7 @@ class AudioPlayer(
         Log.d(TAG, "AudioPlayer 已同步停止并释放资源。")
     }
 
-    // ---------- 新增：上层查询/判定辅助 ----------
+    // ---------- 上层查询/判定辅助 ----------
 
     /**
      * 指定来源/句子在当前时刻是否会被接收并进入播放（或被暂存）。
