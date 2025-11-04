@@ -1,6 +1,5 @@
 package com.qq.wx.offlinevoice.synthesizer.online
 
-import com.qq.wx.offlinevoice.synthesizer.DecodedPcm
 import com.qq.wx.offlinevoice.synthesizer.Speaker
 
 // 模拟的在线TTS API接口 (可以用Retrofit等实现)

@@ -4,10 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.qq.wx.offlinevoice.synthesizer.cache.TtsCacheImpl
 import com.qq.wx.offlinevoice.synthesizer.online.MediaCodecMp3Decoder
-import com.qq.wx.offlinevoice.synthesizer.online.Mp3Decoder
-import com.qq.wx.offlinevoice.synthesizer.online.OnlineTtsApi
 import com.qq.wx.offlinevoice.synthesizer.online.WxReaderApi
-import java.io.IOException
 import java.nio.ShortBuffer
 import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
@@ -20,7 +17,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex

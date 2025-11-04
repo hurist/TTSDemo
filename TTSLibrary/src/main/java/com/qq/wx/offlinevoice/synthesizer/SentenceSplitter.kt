@@ -1,7 +1,6 @@
 package com.qq.wx.offlinevoice.synthesizer
 
 
-import java.util.regex.Matcher
 import java.util.regex.Pattern
 
 /**
