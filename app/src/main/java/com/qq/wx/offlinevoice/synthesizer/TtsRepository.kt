@@ -6,6 +6,7 @@ import com.qq.wx.offlinevoice.synthesizer.online.Mp3Decoder
 import com.qq.wx.offlinevoice.synthesizer.online.OnlineTtsApi
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.io.IOException
 import java.security.MessageDigest
 
 class TtsRepository(
@@ -17,9 +18,23 @@ class TtsRepository(
     private val requestMutexes = mutableMapOf<String, Mutex>()
     private val mapMutex = Mutex()
 
-    suspend fun getDecodedPcm(text: String, speaker: Speaker): DecodedPcm {
+    /**
+     * 获取解码后的 PCM 数据。
+     * 优先从缓存获取，如果缓存未命中，则根据 allowNetwork 参数决定是否发起网络请求。
+     *
+     * @param text 要合成的文本。
+     * @param speaker 发音人。
+     * @param allowNetwork 是否允许在缓存未命中时发起网络请求。默认为 true。
+     * @return 解码后的 DecodedPcm 数据。
+     * @throws IOException 如果缓存未命中且 allowNetwork 为 false，或发生网络/解码错误。
+     */
+    suspend fun getDecodedPcm(
+        text: String,
+        speaker: Speaker,
+        allowNetwork: Boolean = true // --- 1. 添加了缺失的 allowNetwork 参数，并提供默认值 ---
+    ): DecodedPcm {
         val cacheKey = createCacheKey(text, speaker)
-        
+
         // 1. 首先检查缓存
         cache.get(cacheKey)?.let { return it }
 
@@ -33,6 +48,13 @@ class TtsRepository(
                 // 再次检查缓存
                 cache.get(cacheKey)?.let { return it }
 
+                // --- 2. 新增的核心逻辑：在请求网络前检查 allowNetwork 标志 ---
+                if (!allowNetwork) {
+                    // 如果缓存未命中且网络请求被禁止，则必须失败。
+                    throw IOException("缓存未命中，且网络请求被禁止 (例如：正处于冷却期)")
+                }
+
+                // 只有在允许网络请求时才继续
                 Log.d("TtsRepository", "缓存未命中，开始网络请求: $cacheKey")
                 val mp3Data = onlineApi.fetchTtsAudio(text, speaker)
                 val decodedPcm = mp3Decoder.decode(mp3Data)
@@ -54,9 +76,13 @@ class TtsRepository(
         }
     }
 
+    /**
+     * 创建一个安全的、固定长度的缓存键。
+     * 使用 SHA-1 算法对组合了所有影响因素的原始字符串进行哈希。
+     */
     private fun createCacheKey(text: String, speaker: Speaker): String {
         // 组合所有可能影响音频输出的变量
-        val originalKey = "${speaker.modelName}|${text}"
+        val originalKey = "${speaker.modelName}|$text"
 
         // 使用 MessageDigest 来进行哈希
         val digest = MessageDigest.getInstance("SHA-1")

@@ -57,7 +57,7 @@ object WxReaderApi : OnlineTtsApi {
             override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
                 if (response.isSuccessful) {
                     val responseBody = response.body.string()
-                    val result = parseAudioData(responseBody)
+                    val result = parseAudioData(responseBody, text)
                     result.onFailure {
                         when (it) {
                             is SessionExpiredException -> Log.e(TAG, "会话已过期，请重新获取token。")
@@ -77,7 +77,7 @@ object WxReaderApi : OnlineTtsApi {
         })
     }
 
-    private fun parseAudioData(responseBody: String): Result<ByteArray> {
+    private fun parseAudioData(responseBody: String, text: String): Result<ByteArray> {
         val json = JSONObject(responseBody)
         val data = json.optString("audio_data", "")
         if (data.isNotEmpty()) {
@@ -87,6 +87,7 @@ object WxReaderApi : OnlineTtsApi {
             val baseResponse = json.optJSONObject("baseResponse")
             val errMsg = baseResponse?.optString("msg", "未知错误") ?: "未知错误"
             val errCode = baseResponse?.optInt("ret", -1) ?: -1
+            Log.d(TAG, "API返回错误，响应内容： $responseBody, 内容：$text")
             return if (errCode == -13) {
                 Result.failure(SessionExpiredException(errMsg))
             } else {

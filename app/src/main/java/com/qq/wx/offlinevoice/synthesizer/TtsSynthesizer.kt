@@ -20,6 +20,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -124,7 +125,7 @@ class TtsSynthesizer(
             pathBuilder
         )
         strategyManager = SynthesisStrategyManager(context.applicationContext)
-        val onlineApi = WxReaderApi
+        val onlineApi = WxReaderApi // 已假定 WxReaderApi 被重构为不依赖 context
         val mp3Decoder = MediaCodecMp3Decoder(context.applicationContext)
         val ttsCache = TtsCacheImpl(context.applicationContext)
         ttsRepository = TtsRepository(onlineApi, mp3Decoder, ttsCache)
@@ -291,144 +292,154 @@ class TtsSynthesizer(
     private suspend fun softRestart() { Log.d(TAG, "软重启请求，句子索引: $playingSentenceIndex"); val restartIndex = playingSentenceIndex; synthesisJob?.cancelAndJoin(); synthesisJob = null; Log.d(TAG, "旧的合成任务已取消并等待结束。"); audioPlayer.resetBlocking(); Log.d(TAG, "播放器已同步重置。"); synthesisSentenceIndex = restartIndex; startSynthesis(); Log.d(TAG, "新的合成任务已从索引 $restartIndex 处启动。") }
 
     // --- 合成逻辑 ---
+    /**
+     * 启动合成任务。
+     * 该方法会启动两个并行的子任务：
+     * 1. 核心合成循环 (`launchSynthesisLoop`)：负责实际的音频数据生产。
+     * 2. 网络状态哨兵 (`modeWatcherJob`)：在 `ONLINE_PREFERRED` 策略下，监控网络状态。
+     *    当网络从断开恢复时，它会主动中断当前（可能正在离线合成）的循环，并从当前播放位置
+     *    重新开始，以将后续的语音“升级”为高质量的在线版本。
+     */
     private fun startSynthesis() {
-        // 新增：每次开始新的合成任务时，重置在线失败状态
+        // 每次开始新的合成任务时，重置在线失败状态
         resetOnlineCooldown()
         synthesisJob = scope.launch(Dispatchers.Default) {
-            val modeLock = Mutex()
-            val sessionStrategy = strategyManager.currentStrategy
-            var activeMode = strategyManager.getDesiredMode(sessionStrategy)
             var synthesisLoopJob: Job? = null
 
-            fun launchSynthesisLoop() {
+            // 定义一个可重复使用的启动函数
+            fun runSynthesisLoop() {
                 synthesisLoopJob?.cancel()
-                synthesisLoopJob = launch {
-                    var synthesisFailed = false
-                    try {
-                        while (coroutineContext.isActive && synthesisSentenceIndex < sentences.size) {
-                            val (index, baseMode) = modeLock.withLock { synthesisSentenceIndex to activeMode }
-                            val sentence = sentences[index]
+                synthesisLoopJob = launchSynthesisLoop()
+            }
 
-                            // --- 优化：在决定合成模式前，检查是否处于在线模式冷却期 ---
-                            val isCoolingDown = System.currentTimeMillis() < onlineCooldownUntilTimestamp
-                            val currentMode = if (baseMode == SynthesisMode.ONLINE && isCoolingDown) {
-                                Log.d(TAG, "在线模式冷却中，临时强制使用[离线模式]。")
-                                SynthesisMode.OFFLINE
+            // 哨兵任务：仅在 ONLINE_PREFERRED 策略下运行
+            if (strategyManager.currentStrategy == TtsStrategy.ONLINE_PREFERRED) {
+                launch {
+                    var wasNetworkBad = !strategyManager.isNetworkGood.value
+                    strategyManager.isNetworkGood.collect { isNetworkGood ->
+                        // 关键触发条件：网络从“坏”变“好”
+                        if (wasNetworkBad && isNetworkGood) {
+                            Log.i(TAG, "网络已恢复。执行软重启以升级到在线语音...")
+                            // 停止当前的合成循环，确保它不再向队列中添加低质量音频
+                            synthesisLoopJob?.cancelAndJoin()
+                            // 清理播放队列中尚未播放的低质量音频，但保留正在播放的句子
+                            audioPlayer.resetQueueOnlyBlocking(preserveSentenceIndex = playingSentenceIndex)
+                            // 从下一句开始重新合成
+                            synthesisSentenceIndex = playingSentenceIndex + 1
+                            if (synthesisSentenceIndex < sentences.size) {
+                                Log.i(TAG, "将从句子 $synthesisSentenceIndex 处重新开始在线合成。")
+                                runSynthesisLoop()
                             } else {
-                                baseMode
-                            }
-                            // --- 优化结束 ---
-
-                            val result = when(currentMode) {
-                                SynthesisMode.ONLINE -> performOnlineSynthesis(index, sentence)
-                                SynthesisMode.OFFLINE -> performOfflineSynthesis(index, sentence)
-                            }
-
-                            when (result) {
-                                is SynthesisResult.Success -> {
-                                    // --- 优化：在线合成成功后，重置冷却状态 ---
-                                    if (currentMode == SynthesisMode.ONLINE) {
-                                        resetOnlineCooldown()
-                                    }
-                                    modeLock.withLock { if (synthesisSentenceIndex == index) synthesisSentenceIndex++ }
-                                }
-                                is SynthesisResult.Failure -> {
-                                    Log.e(TAG, "句子 $index 合成失败 (模式: $currentMode, 策略: $sessionStrategy): ${result.reason}")
-                                    synthesisFailed = true
-                                    if (sessionStrategy == TtsStrategy.ONLINE_PREFERRED && currentMode == SynthesisMode.ONLINE) {
-                                        // --- 优化：在线合成失败，激活冷却期并回退至离线 ---
-                                        activateOnlineCooldown()
-                                        Log.w(TAG, "在线合成失败，回退至[离线模式]重试。")
-                                        val fallbackResult = performOfflineSynthesis(index, sentence)
-                                        if (fallbackResult is SynthesisResult.Success) {
-                                            modeLock.withLock { if (synthesisSentenceIndex == index) synthesisSentenceIndex++ }
-                                            synthesisFailed = false // 成功回退，不算作致命错误
-                                        } else {
-                                            val reason = (fallbackResult as? SynthesisResult.Failure)?.reason ?: "未知离线错误"
-                                            Log.e(TAG, "离线重试也失败了: $reason")
-                                            break // 离线也失败，则终止合成
-                                        }
-                                    } else {
-                                        break // 非在线优先策略或离线失败，直接终止
-                                    }
-                                }
+                                Log.i(TAG, "所有句子均已播放或正在播放，无需重启合成。")
                             }
                         }
-                    } catch (e: CancellationException) {
-                        Log.d(TAG, "合成循环被取消。")
-                    } finally {
-                        var finalPcm: ShortArray? = null
-                        var finalSampleRate: Int? = null
-                        processorMutex.withLock {
-                            if (onlineAudioProcessor != null) {
-                                finalPcm = onlineAudioProcessor?.flush()
-                                finalSampleRate = onlineAudioProcessor?.sampleRate
-                                Log.d(TAG, "Flushing audio processor, got ${finalPcm?.size ?: 0} final samples.")
-                            }
-                        }
-
-                        val pcmToEnqueue = finalPcm
-                        if (pcmToEnqueue != null && pcmToEnqueue.isNotEmpty() && finalSampleRate != null) {
-                            val lastIndex = (synthesisSentenceIndex - 1).coerceAtLeast(0)
-                            audioPlayer.enqueuePcm(
-                                pcm = pcmToEnqueue,
-                                offset = 0,
-                                length = pcmToEnqueue.size,
-                                sampleRate = finalSampleRate!!,
-                                source = SynthesisMode.ONLINE,
-                                sentenceIndex = lastIndex
-                            )
-                        }
-
-                        if (coroutineContext.isActive) {
-                            Log.i(TAG, "合成循环结束。向播放器发送流结束(EOS)标记。是否因失败而结束: $synthesisFailed")
-                            audioPlayer.enqueueEndOfStream {
-                                if (synthesisFailed) {
-                                    isPausedByError = true
-                                    sendCommand(Command.Pause)
-                                } else {
-                                    Log.i(TAG, "所有句子正常合成完毕，等待播放结束...")
-                                }
-                            }
-                        }
+                        wasNetworkBad = !isNetworkGood
                     }
                 }
             }
 
-            val modeWatcherJob = if (sessionStrategy == TtsStrategy.ONLINE_PREFERRED) {
-                launch {
-                    strategyManager.isNetworkGood.collect { _ ->
-                        modeLock.withLock {
-                            val desiredMode = strategyManager.getDesiredMode(sessionStrategy)
-                            if (activeMode != desiredMode && coroutineContext.isActive) {
-                                if (activeMode == SynthesisMode.OFFLINE && desiredMode == SynthesisMode.ONLINE) {
-                                    // --- 优化：网络恢复时，也应重置冷却状态，立即尝试在线模式 ---
-                                    Log.i(TAG, "网络状况改善。重置冷却状态并主动升级至[在线模式]。")
-                                    resetOnlineCooldown()
+            // 首次启动合成循环
+            runSynthesisLoop()
+        }
+    }
 
-                                    val indexToPreserve = playingSentenceIndex
-                                    audioPlayer.resetQueueOnlyBlocking(preserveSentenceIndex = indexToPreserve)
-                                    Log.i(TAG, "播放队列已软重置，保留了正在播放的句子 $indexToPreserve 的数据。")
+    /**
+     * 核心合成循环。
+     * 该实现包含了最终的“缓存优先”决策逻辑，即使在断网状态下也会尝试使用缓存。
+     */
+    private fun CoroutineScope.launchSynthesisLoop() = launch {
+        var synthesisFailed = false
+        try {
+            while (coroutineContext.isActive && synthesisSentenceIndex < sentences.size) {
+                val index = synthesisSentenceIndex
+                val sentence = sentences[index]
+                val sessionStrategy = strategyManager.currentStrategy
 
-                                    val nextSentenceIndex = playingSentenceIndex + 1
-                                    synthesisSentenceIndex = nextSentenceIndex
-                                    Log.i(TAG, "合成进度已同步，新索引: $nextSentenceIndex")
-                                    activeMode = SynthesisMode.ONLINE
+                var finalResult: SynthesisResult
 
-                                    Log.i(TAG, "重新启动合成循环以应用在线模式。")
-                                    launchSynthesisLoop()
-                                } else if (activeMode == SynthesisMode.ONLINE && desiredMode == SynthesisMode.OFFLINE) {
-                                    Log.w(TAG, "网络状况变差。主动降级至[离线模式]以合成后续句子。")
-                                    activeMode = SynthesisMode.OFFLINE
-                                }
-                            }
+                // --- 核心逻辑重构：策略驱动，缓存优先 ---
+                if (sessionStrategy == TtsStrategy.ONLINE_PREFERRED || sessionStrategy == TtsStrategy.ONLINE_ONLY) {
+                    // 1. 对于在线优先或纯在线策略，总是先尝试“在线路径”。
+                    //    “在线路径”意味着：优先从缓存获取高质量PCM，缓存未命中再尝试网络。
+                    val onlineResult = performOnlineSynthesis(index, sentence)
+
+                    if (onlineResult is SynthesisResult.Success) {
+                        // 缓存命中或网络请求成功！
+                        finalResult = onlineResult
+                        // 成功通过在线路径获取数据，重置冷却计时器
+                        resetOnlineCooldown()
+                    } else {
+                        // 在线路径失败（缓存未命中且网络/API出错）
+                        // 激活冷却，避免短时间内频繁尝试失败的网络请求
+                        activateOnlineCooldown()
+
+                        if (sessionStrategy == TtsStrategy.ONLINE_PREFERRED) {
+                            // 2a. 如果是“在线优先”策略，则回退到离线模式
+                            Log.w(TAG, "在线路径失败(缓存未命中或API错误)，回退至[离线模式]。原因: ${(onlineResult as SynthesisResult.Failure).reason}")
+                            finalResult = performOfflineSynthesis(index, sentence)
+                        } else {
+                            // 2b. 如果是“纯在线”策略，则本次合成彻底失败
+                            Log.e(TAG, "纯在线模式合成失败，无可用回退。原因: ${(onlineResult as SynthesisResult.Failure).reason}")
+                            finalResult = onlineResult
                         }
                     }
+                } else {
+                    // 3. 对于“纯离线”策略，直接使用离线合成
+                    finalResult = performOfflineSynthesis(index, sentence)
                 }
-            } else null
 
-            Log.i(TAG, "首次启动合成循环。")
-            launchSynthesisLoop()
+                // --- 处理最终结果 ---
+                when (finalResult) {
+                    is SynthesisResult.Success -> {
+                        if (synthesisSentenceIndex == index) {
+                            synthesisSentenceIndex++
+                        }
+                    }
+                    is SynthesisResult.Failure -> {
+                        // 如果执行到这里，意味着所有尝试（包括可能的回退）都失败了
+                        Log.e(TAG, "句子 $index 合成最终失败 (策略: $sessionStrategy): ${finalResult.reason}")
+                        synthesisFailed = true
+                        break // 终止整个合成任务
+                    }
+                }
+            }
+        } catch (e: CancellationException) {
+            Log.d(TAG, "合成循环被取消。")
+        } finally {
+            var finalPcm: ShortArray? = null
+            var finalSampleRate: Int? = null
+            processorMutex.withLock {
+                if (onlineAudioProcessor != null) {
+                    finalPcm = onlineAudioProcessor?.flush()
+                    finalSampleRate = onlineAudioProcessor?.sampleRate
+                    Log.d(TAG, "Flushing audio processor, got ${finalPcm?.size ?: 0} final samples.")
+                }
+            }
+
+            val pcmToEnqueue = finalPcm
+            if (pcmToEnqueue != null && pcmToEnqueue.isNotEmpty() && finalSampleRate != null) {
+                val lastIndex = (synthesisSentenceIndex - 1).coerceAtLeast(0)
+                audioPlayer.enqueuePcm(
+                    pcm = pcmToEnqueue,
+                    offset = 0,
+                    length = pcmToEnqueue.size,
+                    sampleRate = finalSampleRate!!,
+                    source = SynthesisMode.ONLINE,
+                    sentenceIndex = lastIndex
+                )
+            }
+
+            if (coroutineContext.isActive) {
+                Log.i(TAG, "合成循环结束。向播放器发送流结束(EOS)标记。是否因失败而结束: $synthesisFailed")
+                audioPlayer.enqueueEndOfStream {
+                    if (synthesisFailed) {
+                        isPausedByError = true
+                        sendCommand(Command.Pause)
+                    } else {
+                        Log.i(TAG, "所有句子正常合成完毕，等待播放结束...")
+                    }
+                }
+            }
         }
     }
 
@@ -438,8 +449,12 @@ class TtsSynthesizer(
                 Log.w(TAG, "句子 $index 内容为空，跳过在线合成。")
                 return SynthesisResult.Success
             }
-            Log.d(TAG, "正在合成[在线]句子 $index: \"$sentence\"")
-            val decoded = ttsRepository.getDecodedPcm(sentence, currentSpeaker)
+            Log.d(TAG, "正在尝试[在线路径]获取句子 $index: \"$sentence\"")
+
+            // TtsRepository 会处理缓存检查和网络请求的逻辑
+            // 即使在冷却期，Repository也会检查缓存，只是不会发起网络请求
+            val isCoolingDown = System.currentTimeMillis() < onlineCooldownUntilTimestamp
+            val decoded = ttsRepository.getDecodedPcm(sentence, currentSpeaker, allowNetwork = !isCoolingDown)
 
             val pcmData = decoded.pcmData
             val sampleRate = decoded.sampleRate
@@ -473,13 +488,10 @@ class TtsSynthesizer(
 
             audioPlayer.enqueueMarker(index, AudioPlayer.MarkerType.SENTENCE_END, SynthesisMode.ONLINE, endCb)
             return SynthesisResult.Success
-        } catch (e: IOException) {
-            val reason = "在线合成IO错误 (句子 $index): ${e.message}"
-            Log.e(TAG, reason)
-            return SynthesisResult.Failure(reason)
         } catch (e: Exception) {
-            val reason = "在线合成或解码异常 (句子 $index): ${e.message}"
-            Log.e(TAG, reason, e)
+            // 捕获所有来自 Repository 的异常 (如 IOException, WxApiException, DecodeException)
+            val reason = "在线路径失败 (句子 $index): ${e.message}"
+            Log.w(TAG, reason, if (e is IOException) null else e) // 避免为常见网络错误打印完整堆栈
             return SynthesisResult.Failure(reason)
         }
     }
@@ -489,7 +501,7 @@ class TtsSynthesizer(
             try {
                 if (sentence.trim().isEmpty()) {
                     Log.w(TAG, "句子 $index 内容为空，跳过离线合成。")
-                    return SynthesisResult.Success
+                    return@withLock SynthesisResult.Success
                 }
                 Log.d(TAG, "正在合成[离线]句子 $index: \"$sentence\"")
                 val prepare = prepareForSynthesis(sentence, currentSpeed, currentVolume)
@@ -510,7 +522,7 @@ class TtsSynthesizer(
                     if (status == -1) {
                         val reason = "本地合成失败，状态码: -1"
                         Log.e(TAG, reason)
-                        return SynthesisResult.Success
+                        return@withLock SynthesisResult.Success
                     }
                     val num = synthResult[0]
                     if (num <= 0) break
