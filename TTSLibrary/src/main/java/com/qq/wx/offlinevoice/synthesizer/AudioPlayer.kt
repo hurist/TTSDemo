@@ -457,6 +457,7 @@ class AudioPlayer(
             Log.i(TAG, "保护期丢弃入队的离线Marker：句子#$sentenceIndex type=$type")
             return
         }
+        Log.i(TAG, "入队Marker：句子#$sentenceIndex type=$type from $source")
         pcmChannel.send(QueueItem.Marker(generation, sentenceIndex, type, source, onReached))
     }
 

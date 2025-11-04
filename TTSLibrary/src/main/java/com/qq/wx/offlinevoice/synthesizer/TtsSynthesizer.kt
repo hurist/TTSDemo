@@ -22,6 +22,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.coroutineContext
+import kotlin.properties.Delegates
 
 /**
  * TTS 合成器主类。
@@ -64,8 +65,10 @@ class TtsSynthesizer(
 
     private var currentState: TtsPlaybackState = TtsPlaybackState.IDLE
     private val sentences = mutableListOf<String>()
-    private var playingSentenceIndex: Int = 0
-    private var synthesisSentenceIndex: Int = 0
+    @Volatile private var playingSentenceIndex: Int = 0
+    private var synthesisSentenceIndex by Delegates.observable(0) { _, oldValue, newValue ->
+        Log.d(TAG, "修改synthesisSentenceIndex： $oldValue -> $newValue")
+    }
     private var currentSpeed: Float = 1.0f
     private var currentVolume: Float = 1.0f
     private var currentSpeaker = speaker
@@ -166,7 +169,11 @@ class TtsSynthesizer(
                 is Command.Release -> { handleRelease(); break }
                 is Command.SetStrategy -> strategyManager.setStrategy(command.strategy)
                 is Command.SetCallback -> { currentCallback = command.callback; currentCallback?.onInitialized(true) }
-                is Command.InternalSentenceStart -> { playingSentenceIndex = command.index; currentCallback?.onSentenceStart(command.index, command.sentence, sentences.size) }
+                is Command.InternalSentenceStart -> {
+                    playingSentenceIndex = command.index;
+                    currentCallback?.onSentenceStart(command.index, command.sentence, sentences.size)
+                    Log.d(TAG, "修改句子索引为 ${command.index}: ${command.sentence}")
+                }
                 is Command.InternalSentenceEnd -> {
                     currentCallback?.onSentenceComplete(command.index, command.sentence)
                     if (command.index == sentences.size - 1 && !isPausedByError) {
@@ -388,6 +395,7 @@ class TtsSynthesizer(
                 // --- 处理最终结果 ---
                 when (finalResult) {
                     is SynthesisResult.Success -> {
+                        Log.d(TAG, "处理合成位置：synthesisSentenceIndex:$synthesisSentenceIndex, index:$index")
                         if (synthesisSentenceIndex == index) {
                             synthesisSentenceIndex++
                         }
