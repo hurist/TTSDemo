@@ -52,7 +52,7 @@ class NetworkMonitor(context: Context) {
         }
 
         override fun onLost(network: Network) {
-            Log.d(TAG, "onLost: 网络 $network 已丢失。")
+            Log.d(TAG, "onLost: 网络 $network 已丢失。$validNetworks")
             scope.launch {
                 mutex.withLock {
                     validNetworks.remove(network)
@@ -67,11 +67,11 @@ class NetworkMonitor(context: Context) {
                 mutex.withLock {
                     if (isNetworkConsideredValid(caps)) {
                         if (validNetworks.add(network)) {
-                            Log.i(TAG, "onCapabilitiesChanged: ✅ 网络 $network 变为有效，已添加。")
+                            Log.i(TAG, "onCapabilitiesChanged: ✅ 网络 $network 变为有效，已添加。$validNetworks")
                         }
                     } else {
                         if (validNetworks.remove(network)) {
-                            Log.w(TAG, "onCapabilitiesChanged: ❌ 网络 $network 变为无效或被忽略，已移除。")
+                            Log.w(TAG, "onCapabilitiesChanged: ❌ 网络 $network 变为无效或被忽略，已移除。$validNetworks")
                         }
                     }
                     updateStatus()
@@ -140,22 +140,23 @@ class NetworkMonitor(context: Context) {
     private fun isNetworkConsideredValid(caps: NetworkCapabilities?): Boolean {
         if (caps == null) return false
 
-        // CHANGE 1: 必须具备 INTERNET 能力 (这将过滤掉 IMS 网络)
+        // 1. 必须具备 INTERNET 能力
         val hasInternet = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
 
-        // CHANGE 2: 必须经过验证 (Android 6.0+)
+        // 2. 必须经过验证 (Android 6.0+)
         val isValidated = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
         } else {
-            true // 在 Android 5.x 上，我们只依赖 INTERNET 能力
+            true
         }
 
-        // CHANGE 3: 必须是物理网络，明确排除 VPN
-        val isActualNetwork = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
-                caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
-                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+        // 3. 必须不是 VPN
+        //    我们只关心设备底层的物理连接状态。
+        //    VPN 会依附于物理连接，只要物理连接有效，我们就可以认为网络是好的。
+        //    单独判断 VPN 会在物理网络断开时导致误判。
+        val isNotVpn = !caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
 
-        return hasInternet && isValidated && isActualNetwork
+        return hasInternet && isValidated && isNotVpn
     }
 
     private fun updateStatus() {

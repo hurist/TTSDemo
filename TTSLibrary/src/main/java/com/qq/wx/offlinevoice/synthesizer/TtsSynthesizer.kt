@@ -315,6 +315,7 @@ class TtsSynthesizer(
                     strategyManager.isNetworkGood.collect { isNetworkGood ->
                         // 关键触发条件：网络从“坏”变“好”
                         if (wasNetworkBad && isNetworkGood) {
+                            resetOnlineCooldown()
                             Log.i(TAG, "网络已恢复。执行软重启以升级到在线语音...")
                             // 停止当前的合成循环，确保它不再向队列中添加低质量音频
                             synthesisLoopJob?.cancelAndJoin()
@@ -605,5 +606,9 @@ class TtsSynthesizer(
         }
         onlineFailureCount = 0
         onlineCooldownUntilTimestamp = 0L
+    }
+
+    fun getVoiceDataPath(): String {
+        return voiceDataPath
     }
 }
