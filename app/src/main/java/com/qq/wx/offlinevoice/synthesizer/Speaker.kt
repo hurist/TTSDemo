@@ -5,5 +5,5 @@ data class Speaker(
     val isMale: Boolean
 ) {
     val offlineModelName: String
-        get() = if (isMale) "lsl" else "F191"
+        get() = if (isMale) if (modelName == "tts_valle") "dtn" else "lsl" else "F191"
 }
