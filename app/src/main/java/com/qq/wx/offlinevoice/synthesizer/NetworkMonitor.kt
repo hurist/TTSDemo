@@ -4,34 +4,47 @@ import android.content.Context
 import android.net.*
 import android.os.Build
 import android.util.Log
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
+/**
+ * NetworkMonitor（最终版，兼容 API 21+，已修复VPN和IMS问题）
+ *
+ * ✅ Android 6+：使用 NET_CAPABILITY_VALIDATED（最精确）
+ * ⚙️ Android 5–5.1：fallback 到 legacy 的 NetworkInfo.isConnected()
+ *
+ * 💡 新增逻辑: 明确排除 VPN 和仅用于 VoLTE 的 IMS 网络。
+ */
 class NetworkMonitor(context: Context) {
+
+    private val TAG = "NetworkMonitor"
+
     private val _isNetworkGood = MutableStateFlow(false)
     val isNetworkGood: StateFlow<Boolean> = _isNetworkGood.asStateFlow()
 
+    private val appContext = context.applicationContext
     private val connectivityManager =
-        context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
-    // 维护一个当前可用并具备上网能力的网络的集合
-    private val validNetworks: MutableSet<Network> = HashSet()
+    private val validNetworks = mutableSetOf<Network>()
     private val mutex = Mutex()
     private val scope = CoroutineScope(Dispatchers.Default)
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
+            Log.d(TAG, "onAvailable: 网络 $network 可用，检查其能力...")
             scope.launch {
                 mutex.withLock {
                     val caps = connectivityManager.getNetworkCapabilities(network)
-                    if (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true) {
+                    if (isNetworkConsideredValid(caps)) {
                         validNetworks.add(network)
+                        Log.i(TAG, "onAvailable: ✅ 网络 $network 有效，已添加。")
+                    } else {
+                        Log.w(TAG, "onAvailable: ❌ 网络 $network 无效或被忽略。能力: $caps")
                     }
                     updateStatus()
                 }
@@ -39,6 +52,7 @@ class NetworkMonitor(context: Context) {
         }
 
         override fun onLost(network: Network) {
+            Log.d(TAG, "onLost: 网络 $network 已丢失。")
             scope.launch {
                 mutex.withLock {
                     validNetworks.remove(network)
@@ -48,12 +62,17 @@ class NetworkMonitor(context: Context) {
         }
 
         override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+            Log.d(TAG, "onCapabilitiesChanged -> 网络: $network, 新能力: $caps")
             scope.launch {
                 mutex.withLock {
-                    if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) {
-                        validNetworks.add(network)
+                    if (isNetworkConsideredValid(caps)) {
+                        if (validNetworks.add(network)) {
+                            Log.i(TAG, "onCapabilitiesChanged: ✅ 网络 $network 变为有效，已添加。")
+                        }
                     } else {
-                        validNetworks.remove(network)
+                        if (validNetworks.remove(network)) {
+                            Log.w(TAG, "onCapabilitiesChanged: ❌ 网络 $network 变为无效或被忽略，已移除。")
+                        }
                     }
                     updateStatus()
                 }
@@ -63,41 +82,92 @@ class NetworkMonitor(context: Context) {
 
     init {
         registerCallback()
-        // 首次检查当前状态
         checkInitialState()
     }
 
     private fun registerCallback() {
         val request = NetworkRequest.Builder()
-            .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+            // 保持监听所有网络类型，然后在 isNetworkConsideredValid 中进行过滤
+            .addTransportType(NetworkCapabilities.TRANSPORT_WIFI)
+            .addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+            .addTransportType(NetworkCapabilities.TRANSPORT_ETHERNET)
+            .addTransportType(NetworkCapabilities.TRANSPORT_VPN) // 仍然监听VPN，以便在onCapabilitiesChanged中正确移除
             .build()
-        connectivityManager.registerNetworkCallback(request, networkCallback)
+
+        try {
+            connectivityManager.registerNetworkCallback(request, networkCallback)
+            Log.d(TAG, "网络回调注册成功。")
+        } catch (e: Exception) {
+            Log.e(TAG, "注册网络回调失败: ${e.message}")
+        }
     }
 
     private fun checkInitialState() {
         scope.launch {
             mutex.withLock {
+                Log.d(TAG, "--- 正在检查初始网络状态 ---")
                 try {
-                    val networks = connectivityManager.allNetworks
-                    for (network in networks) {
-                        val caps = connectivityManager.getNetworkCapabilities(network)
-                        if (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true) {
-                            validNetworks.add(network)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        val networks = connectivityManager.allNetworks
+                        validNetworks.clear() // 清空，防止重复添加
+                        Log.d(TAG, "发现 ${networks.size} 个网络，开始遍历...")
+                        for (network in networks) {
+                            val caps = connectivityManager.getNetworkCapabilities(network)
+                            Log.d(TAG, "检查网络: $network, 能力: $caps")
+                            if (isNetworkConsideredValid(caps)) {
+                                Log.i(TAG, "✅ 初始检查: 网络 $network 被认为是有效的，已添加。")
+                                validNetworks.add(network)
+                            } else {
+                                Log.w(TAG, "❌ 初始检查: 网络 $network 无效或被忽略。")
+                            }
+                        }
+                    } else {
+                        val info = connectivityManager.activeNetworkInfo
+                        Log.d(TAG, "Android 5.x Fallback: activeNetworkInfo = $info")
+                        if (info != null && info.isConnected) {
+                            _isNetworkGood.value = true
                         }
                     }
                 } catch (e: Exception) {
-                    Log.e("NetworkMonitor", "初始化网络状态检查失败", e)
+                    Log.e(TAG, "初始化网络状态检查失败: ${e.message}")
                 }
                 updateStatus()
+                Log.d(TAG, "--- 初始网络状态检查结束 ---")
             }
         }
     }
 
-    // 更新状态，只有在状态确实改变时才发射新值
+    private fun isNetworkConsideredValid(caps: NetworkCapabilities?): Boolean {
+        if (caps == null) return false
+
+        // CHANGE 1: 必须具备 INTERNET 能力 (这将过滤掉 IMS 网络)
+        val hasInternet = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+
+        // CHANGE 2: 必须经过验证 (Android 6.0+)
+        val isValidated = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
+        } else {
+            true // 在 Android 5.x 上，我们只依赖 INTERNET 能力
+        }
+
+        // CHANGE 3: 必须是物理网络，明确排除 VPN
+        val isActualNetwork = caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) ||
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+
+        return hasInternet && isValidated && isActualNetwork
+    }
+
     private fun updateStatus() {
-        val newStatus = validNetworks.isNotEmpty()
+        val newStatus = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            validNetworks.isNotEmpty()
+        } else {
+            val info = connectivityManager.activeNetworkInfo
+            info != null && info.isConnected
+        }
+
         if (_isNetworkGood.value != newStatus) {
-            Log.d("NetworkMonitor", "网络状态更新: isNetworkGood = $newStatus")
+            Log.i(TAG, "网络状态更新: isNetworkGood 从 ${_isNetworkGood.value} 变为 $newStatus. 有效网络数量: ${validNetworks.size}")
             _isNetworkGood.value = newStatus
         }
     }
@@ -105,8 +175,10 @@ class NetworkMonitor(context: Context) {
     fun release() {
         try {
             connectivityManager.unregisterNetworkCallback(networkCallback)
+            Log.d(TAG, "网络回调已注销。")
         } catch (e: Exception) {
-            Log.e("NetworkMonitor", "注销网络回调失败", e)
+            Log.e(TAG, "注销网络回调失败: ${e.message}")
         }
+        scope.cancel()
     }
 }
