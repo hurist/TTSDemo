@@ -22,20 +22,12 @@ import kotlin.coroutines.coroutineContext
 /**
  * 流式 TTS 播放器，支持软/硬重置与在线/离线混播。
  *
- * 修复点（离线→在线升级时多念/乱序/回调错位）：
- * - 引入“保护期”：软重置(保留当前句)后，仅允许该句的离线数据进入并播放；
- *   其他离线数据直接丢弃；在线数据按“句子分桶 + 有音频优先”的策略暂存，
- *   保护句播放彻底结束后，按句序回吐：仅当句子至少包含一个 PCM 时才触发 START/PCM/END，
- *   彻底避免“只有 Marker 导致的索引空推进”和“乱序回调”。
- * - 不对队列做“延时重入”的操作，避免乱序；样本率切换仅在保护期结束后进行，避免离线尾巴被 flush。
- *
- * 额外暴露状态查询：
- * - canAccept(source, sentenceIndex): 便于上层在保护期内对“非受保护句离线回退”进行延后（返回 Deferred），避免“成功但被丢弃”推进索引。
- * - isInProtection / getProtectedSentenceIndex：便于上层进行策略判定与日志。
- *
- * 暂停/恢复可靠性修复：
- * - 暂停状态下“不再从 PCM 队列取数据”，而是“只消费控制命令”，确保 resetBlocking/软重置能即时生效，避免 ack 卡死导致恢复失败。
- * - 写 PCM 的过程中仍支持暂停与控制命令抢占（writePcmInChunks 内已有处理）。
+ * 稳定性与顺序修复：
+ * - 保护期：软重置(保留当前句)后，仅允许该句的离线数据进入并播放；其他离线数据直接丢弃；
+ *   在线数据按“句子分桶 + 有音频优先”的策略暂存，保护句播放彻底结束后按句序吐回：
+ *   仅当句子至少包含一个 PCM 时才触发 START/PCM/END，避免“只有 Marker 导致的索引空推进”与乱序。
+ * - 暂停/恢复可靠性：暂停状态下“不消费 PCM 队列”，仅消费控制命令，确保 reset/软重置的 ack 不会卡死；
+ *   写 PCM 的循环内也支持控制命令抢占与暂停等待。
  */
 class AudioPlayer(
     private val initialSampleRate: Int = TtsConstants.DEFAULT_SAMPLE_RATE,
@@ -90,10 +82,10 @@ class AudioPlayer(
     @Volatile private var protectedSentenceIndex: Int = -1
 
     /**
-     * 保护期内到达的“在线数据”句子分桶缓冲（严格句内顺序，但回吐时按句序+是否有PCM决定）：
-     * - hasPcm: 该句是否至少包含一段 PCM（用于决定是否触发回调/推进）
+     * 保护期内到达的“在线数据”句子分桶缓冲：
+     * - hasPcm: 是否至少包含一段 PCM（决定是否触发句子回调/推进）
      * - hasStart/hasEnd: 是否收到过对应 Marker（用于回吐顺序组织）
-     * - items: 原始到达顺序（句内）保留；回吐时按 START -> 所有PCM(按到达顺序) -> END 的顺序
+     * - items: 原始到达顺序（句内）保留；回吐时按 START -> 所有 PCM(到达顺序) -> END 的顺序
      */
     private data class DeferredBucket(
         val sentenceIndex: Int,
@@ -134,15 +126,14 @@ class AudioPlayer(
         try {
             while (isActive && !isStopped) {
 
-                // 1) 优先处理控制命令：先尝试非阻塞地拉取一次
+                // 1) 优先非阻塞消费控制命令
                 controlChannel.tryReceive().getOrNull()?.let { control ->
                     processControlCommand(control)
                     continue
                 }
 
-                // 2) 若处于暂停态：只处理控制命令，不消费 PCM 队列，避免卡死 reset/soft reset 的 ack
+                // 2) 暂停态：不消费 PCM，仅轮询控制命令，防止 reset/软重置 ack 卡住
                 if (isPaused) {
-                    // 为了响应及时，这里仍周期性探测控制通道
                     val ctrl = controlChannel.tryReceive().getOrNull()
                     if (ctrl != null) {
                         processControlCommand(ctrl)
@@ -153,7 +144,7 @@ class AudioPlayer(
                     continue
                 }
 
-                // 3) 正常态：监听控制与 PCM/Marker 两个通道
+                // 3) 正常消费：select 监听控制与 PCM/Marker
                 select<Unit> {
                     controlChannel.onReceive { control ->
                         processControlCommand(control)
@@ -167,7 +158,7 @@ class AudioPlayer(
 
                         when (item) {
                             is QueueItem.Pcm -> {
-                                // 保护期：只播放“受保护句”的离线PCM；在线PCM句内暂存（句序回吐）
+                                // 保护期：仅允许受保护句的离线 PCM；在线 PCM 句内暂存（句序回吐）
                                 if (protectionActive && item.sentenceIndex != protectedSentenceIndex) {
                                     if (item.source == SynthesisMode.OFFLINE) {
                                         Log.i(TAG, "保护期丢弃离线PCM：句子#${item.sentenceIndex} (受保护句为#${protectedSentenceIndex})")
@@ -183,7 +174,6 @@ class AudioPlayer(
 
                                 // 播放允许的数据
                                 if (audioTrack == null || item.sampleRate != currentSampleRate) {
-                                    // 只有真正开始播放新条目时才切轨；保护期内不会遇到采样率变化
                                     switchSampleRate(item.sampleRate)
                                 }
                                 if (currentPlaybackSource != item.source || audioTrack?.sampleRate != item.sampleRate) {
@@ -194,7 +184,7 @@ class AudioPlayer(
                                 writePcmInChunks(item)
                             }
                             is QueueItem.Marker -> {
-                                // 保护期：只触发“受保护句”的离线 Marker；在线 Marker 句内暂存
+                                // 保护期：仅触发受保护句的离线 Marker；在线 Marker 句内暂存
                                 if (protectionActive && item.sentenceIndex != protectedSentenceIndex) {
                                     if (item.source == SynthesisMode.OFFLINE) {
                                         Log.i(TAG, "保护期丢弃离线Marker：句子#${item.sentenceIndex} type=${item.type}")
@@ -214,7 +204,7 @@ class AudioPlayer(
                                     catch (t: Throwable) { Log.w(TAG, "执行 Marker 回调时出错", t) }
                                 }
 
-                                // 若为受保护句的 END：等待缓冲排空 -> 结束保护期 -> 按句序吐回在线暂存（仅回吐含PCM的句子）
+                                // 受保护句 END：等待缓冲排空 -> 结束保护期 -> 按句序吐回仅含 PCM 的句子
                                 if (protectionActive && item.sentenceIndex == protectedSentenceIndex && item.type == MarkerType.SENTENCE_END) {
                                     Log.i(TAG, "受保护句 #${item.sentenceIndex} 的 END 已到达，等待缓冲排空后结束保护期并按句序吐回在线暂存。")
                                     launch {
@@ -223,40 +213,32 @@ class AudioPlayer(
                                         protectedSentenceIndex = -1
                                         val toFlushBuckets = deferredOnline.size
                                         if (toFlushBuckets > 0) {
-                                            Log.i(TAG, "开始吐回 ${toFlushBuckets} 个句子的在线暂存（仅含PCM的句子会被回吐，按句序）")
+                                            Log.i(TAG, "开始吐回 ${toFlushBuckets} 个句子的在线暂存（仅含PCM的句子回吐，按句序）")
                                             val indices = deferredOnline.keys.sorted()
                                             for (si in indices) {
                                                 val b = deferredOnline[si] ?: continue
-                                                val hasPcm = b.hasPcm
-                                                val hasStart = b.hasStart
-                                                val hasEnd = b.hasEnd
-                                                if (!hasPcm) {
-                                                    Log.w(TAG, "句子#$si 在线暂存仅包含 Marker (start=$hasStart, end=$hasEnd) 且无PCM，丢弃以避免空推进。")
+                                                if (!b.hasPcm) {
+                                                    Log.w(TAG, "句子#$si 在线暂存仅包含 Marker，无 PCM，丢弃以避免空推进。")
                                                     continue
                                                 }
-                                                // 组织回吐顺序：START -> 全部 PCM(到达顺序) -> END
                                                 val startMarker = b.items.firstOrNull { it is QueueItem.Marker && it.type == MarkerType.SENTENCE_START } as? QueueItem.Marker
                                                 val endMarker = b.items.lastOrNull { it is QueueItem.Marker && it.type == MarkerType.SENTENCE_END } as? QueueItem.Marker
                                                 val pcms = b.items.filterIsInstance<QueueItem.Pcm>()
 
-                                                if (startMarker != null) {
+                                                startMarker?.let {
                                                     Log.i(TAG, "回吐句子#$si：发送 START")
-                                                    pcmChannel.send(startMarker.copy(gen = generation))
-                                                } else {
-                                                    Log.w(TAG, "回吐句子#$si：未发现 START Marker，直接播放 PCM（将缺少开始回调）。")
-                                                }
+                                                    pcmChannel.send(it.copy(gen = generation))
+                                                } ?: Log.w(TAG, "回吐句子#$si：缺少 START Marker。")
 
                                                 for (p in pcms) {
                                                     Log.i(TAG, "回吐句子#$si：发送 PCM 长度=${p.length}")
                                                     pcmChannel.send(p.copy(gen = generation))
                                                 }
 
-                                                if (endMarker != null) {
+                                                endMarker?.let {
                                                     Log.i(TAG, "回吐句子#$si：发送 END")
-                                                    pcmChannel.send(endMarker.copy(gen = generation))
-                                                } else {
-                                                    Log.w(TAG, "回吐句子#$si：未发现 END Marker（可能由上游中断导致）。")
-                                                }
+                                                    pcmChannel.send(it.copy(gen = generation))
+                                                } ?: Log.w(TAG, "回吐句子#$si：缺少 END Marker。")
                                             }
                                         }
                                         deferredOnline.clear()
@@ -351,7 +333,7 @@ class AudioPlayer(
      * 分块写入 PCM，处理控制命令：
      * - HARD：立即中断。
      * - SOFT_QUEUE_ONLY：若保留的是当前句，允许跨代次写完本块，避免断句；否则中断本块以尽快切换。
-     * - 支持暂停：在写入循环内检测 isPaused，并允许控制命令抢占，避免暂停期间的硬/软重置被卡住。
+     * - 支持暂停：暂停期间不继续写入，但允许控制命令抢占，避免暂停期间 reset/软重置被卡住。
      */
     private suspend fun writePcmInChunks(item: QueueItem.Pcm) {
         val at = audioTrack ?: return
@@ -394,7 +376,6 @@ class AudioPlayer(
             // 暂停处理：暂停期间不继续写入，但仍允许上面的控制命令抢占
             while (isPaused && coroutineContext.isActive && !isStopped) {
                 delay(10)
-                // 循环内再次尝试抢占控制命令
                 controlChannel.tryReceive().getOrNull()?.let { processControlCommand(it) }
                 if (item.gen != generation && !allowContinueAcrossGenBump) {
                     Log.d(TAG, "暂停等待中检测到代次变化，结束写入。")
