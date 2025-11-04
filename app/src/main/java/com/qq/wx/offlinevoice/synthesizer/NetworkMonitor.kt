@@ -3,6 +3,7 @@ package com.qq.wx.offlinevoice.synthesizer
 import android.content.Context
 import android.net.*
 import android.os.Build
+import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -55,6 +56,7 @@ class NetworkMonitor(context: Context) {
             val info = connectivityManager.activeNetworkInfo
             info?.isConnected == true
         }
+        Log.d("NetworkMonitor", "网络状态更新: isNetworkGood = $isGood")
         _isNetworkGood.value = isGood
     }
 

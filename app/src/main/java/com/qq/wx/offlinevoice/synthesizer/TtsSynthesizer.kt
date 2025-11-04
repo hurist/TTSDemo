@@ -32,6 +32,7 @@ import kotlin.coroutines.coroutineContext
  * - 接收外部控制命令 (speak, stop, pause, setSpeed 等)。
  * - 维护播放状态和句子队列。
  * - 根据设定的策略 (TtsStrategy) 调度在线或离线合成任务。
+ * - **优化：实现了动态回退与重试机制。当在线合成临时失败时，会自动回退到离线模式，并在一个指数退避的冷却期后，智能地尝试恢复在线合成，以应对网络抖动或服务临时故障。**
  * - 与 AudioPlayer 协作，将合成的音频数据流式传输以供播放。
  * - 通过 TtsCallback 向外部通知状态变化、进度和错误。
  *
@@ -88,11 +89,20 @@ class TtsSynthesizer(
     private val processorMutex = Mutex()
     private val splitterStrategy = SentenceSplitterStrategy.PUNCTUATION
 
+    // --- 新增：在线模式回退与重试机制的状态变量 ---
+    private var onlineFailureCount: Int = 0
+    private var onlineCooldownUntilTimestamp: Long = 0L
+
     companion object {
         private const val TAG = "TtsSynthesizer"
         private val instanceCount = AtomicInteger(0)
         @Volatile private var nativeEngine: SynthesizerNative? = null
         @Volatile private var currentVoiceCode: String? = null
+
+        // --- 新增：指数退避算法的常量 ---
+        private const val BASE_COOLDOWN_MS = 3000L // 基础冷却时间 3 秒
+        private const val MAX_COOLDOWN_MS = 60000L // 最大冷却时间 1 分钟
+
         init {
             try {
                 System.loadLibrary("hwTTS")
@@ -254,40 +264,22 @@ class TtsSynthesizer(
         }
     }
 
-    /**
-     * 核心修复：实现了激进的、高响应性的停止逻辑。
-     *
-     * 停止流程遵循“优先停止声音”的原则：
-     * 1.  **立即取消 (Cancel)**: 立即向合成任务(生产者)发送取消信号，但**不等待(join)**它完成。这会尽快停止网络请求或CPU密集型的本地合成计算。
-     * 2.  **立即重置 (Reset)**: 紧接着，命令 AudioPlayer(消费者)进行硬重置。由于 AudioPlayer 现已实现为可中断的，此命令会几乎瞬间被执行，清空所有软硬件音频缓冲区，从而立即停止声音。
-     * 3.  **最后等待 (Join)**: 在声音已经停止后，再安全地等待合成任务协程完全终止，以确保所有资源被正确释放，避免任何悬空状态。
-     *
-     * 这种 `cancel` -> `reset` -> `join` 的顺序确保了用户感知的停止延迟最小化。
-     */
     private suspend fun handleStop() {
         if (currentState == TtsPlaybackState.IDLE) return
         Log.d(TAG, "开始执行 handleStop...")
         isPausedByError = false
-
-        // 1. 立即向合成任务发送取消信号，但不要等待(join)它。
         val jobToJoin = synthesisJob
         jobToJoin?.cancel()
         synthesisJob = null
         Log.d(TAG, "已向合成任务发送取消信号。")
-
-        // 2. 立即重置播放器。此操作现在是高响应性的，会迅速中断音频。
         audioPlayer.resetBlocking()
         Log.d(TAG, "播放器已同步重置，音频应已立即停止。")
-
-        // 3. 在声音停止后，再等待合成任务彻底结束。
         jobToJoin?.join()
         Log.d(TAG, "已确认合成任务完全终止。")
-
         processorMutex.withLock {
             onlineAudioProcessor?.release()
             onlineAudioProcessor = null
         }
-
         sentences.clear()
         updateState(TtsPlaybackState.IDLE)
         Log.d(TAG, "handleStop 执行完毕。")
@@ -298,6 +290,8 @@ class TtsSynthesizer(
 
     // --- 合成逻辑 ---
     private fun startSynthesis() {
+        // 新增：每次开始新的合成任务时，重置在线失败状态
+        resetOnlineCooldown()
         synthesisJob = scope.launch(Dispatchers.Default) {
             val modeLock = Mutex()
             val sessionStrategy = strategyManager.currentStrategy
@@ -310,8 +304,18 @@ class TtsSynthesizer(
                     var synthesisFailed = false
                     try {
                         while (coroutineContext.isActive && synthesisSentenceIndex < sentences.size) {
-                            val (index, currentMode) = modeLock.withLock { synthesisSentenceIndex to activeMode }
+                            val (index, baseMode) = modeLock.withLock { synthesisSentenceIndex to activeMode }
                             val sentence = sentences[index]
+
+                            // --- 优化：在决定合成模式前，检查是否处于在线模式冷却期 ---
+                            val isCoolingDown = System.currentTimeMillis() < onlineCooldownUntilTimestamp
+                            val currentMode = if (baseMode == SynthesisMode.ONLINE && isCoolingDown) {
+                                Log.d(TAG, "在线模式冷却中，临时强制使用[离线模式]。")
+                                SynthesisMode.OFFLINE
+                            } else {
+                                baseMode
+                            }
+                            // --- 优化结束 ---
 
                             val result = when(currentMode) {
                                 SynthesisMode.ONLINE -> performOnlineSynthesis(index, sentence)
@@ -320,25 +324,30 @@ class TtsSynthesizer(
 
                             when (result) {
                                 is SynthesisResult.Success -> {
+                                    // --- 优化：在线合成成功后，重置冷却状态 ---
+                                    if (currentMode == SynthesisMode.ONLINE) {
+                                        resetOnlineCooldown()
+                                    }
                                     modeLock.withLock { if (synthesisSentenceIndex == index) synthesisSentenceIndex++ }
                                 }
                                 is SynthesisResult.Failure -> {
                                     Log.e(TAG, "句子 $index 合成失败 (模式: $currentMode, 策略: $sessionStrategy): ${result.reason}")
                                     synthesisFailed = true
                                     if (sessionStrategy == TtsStrategy.ONLINE_PREFERRED && currentMode == SynthesisMode.ONLINE) {
+                                        // --- 优化：在线合成失败，激活冷却期并回退至离线 ---
+                                        activateOnlineCooldown()
                                         Log.w(TAG, "在线合成失败，回退至[离线模式]重试。")
-                                        modeLock.withLock { activeMode = SynthesisMode.OFFLINE }
                                         val fallbackResult = performOfflineSynthesis(index, sentence)
                                         if (fallbackResult is SynthesisResult.Success) {
                                             modeLock.withLock { if (synthesisSentenceIndex == index) synthesisSentenceIndex++ }
-                                            synthesisFailed = false
+                                            synthesisFailed = false // 成功回退，不算作致命错误
                                         } else {
                                             val reason = (fallbackResult as? SynthesisResult.Failure)?.reason ?: "未知离线错误"
                                             Log.e(TAG, "离线重试也失败了: $reason")
-                                            break
+                                            break // 离线也失败，则终止合成
                                         }
                                     } else {
-                                        break
+                                        break // 非在线优先策略或离线失败，直接终止
                                     }
                                 }
                             }
@@ -391,7 +400,9 @@ class TtsSynthesizer(
                             val desiredMode = strategyManager.getDesiredMode(sessionStrategy)
                             if (activeMode != desiredMode && coroutineContext.isActive) {
                                 if (activeMode == SynthesisMode.OFFLINE && desiredMode == SynthesisMode.ONLINE) {
-                                    Log.i(TAG, "网络状况改善。主动升级至[在线模式]。")
+                                    // --- 优化：网络恢复时，也应重置冷却状态，立即尝试在线模式 ---
+                                    Log.i(TAG, "网络状况改善。重置冷却状态并主动升级至[在线模式]。")
+                                    resetOnlineCooldown()
 
                                     val indexToPreserve = playingSentenceIndex
                                     audioPlayer.resetQueueOnlyBlocking(preserveSentenceIndex = indexToPreserve)
@@ -427,6 +438,7 @@ class TtsSynthesizer(
             }
             Log.d(TAG, "正在合成[在线]句子 $index: \"$sentence\"")
             val mp3Data = onlineApi.fetchTtsAudio(sentence, currentSpeaker)
+
             if (!coroutineContext.isActive) return SynthesisResult.Failure("协程被取消")
             if (mp3Data.isEmpty()) {
                 val reason = "在线API返回空音频"
@@ -489,7 +501,6 @@ class TtsSynthesizer(
                 if (prepare != 0) {
                     val reason = "离线引擎准备失败 (code=$prepare) 句子: $sentence"
                     Log.e(TAG, reason)
-                    //return@withLock SynthesisResult.Failure(reason)
                     return@withLock SynthesisResult.Success
                 }
 
@@ -504,8 +515,6 @@ class TtsSynthesizer(
                     if (status == -1) {
                         val reason = "本地合成失败，状态码: -1"
                         Log.e(TAG, reason)
-                        //nativeEngine?.reset()
-                        //return@withLock SynthesisResult.Failure(reason)
                         return SynthesisResult.Success
                     }
                     val num = synthResult[0]
@@ -564,5 +573,32 @@ class TtsSynthesizer(
             currentCallback?.onStateChanged(newState)
             _isPlaying.value = newState == TtsPlaybackState.PLAYING
         }
+    }
+
+    // --- 新增：用于管理在线模式冷却的辅助函数 ---
+
+    /**
+     * 当在线合成失败时调用此函数。
+     * 它会增加失败计数，并根据指数退避算法计算并设置下一次可以尝试在线模式的时间戳。
+     */
+    private fun activateOnlineCooldown() {
+        onlineFailureCount++
+        // 计算退避乘数 (1, 2, 4, 8, 16, 32...)
+        val backoffFactor = (1 shl (onlineFailureCount - 1).coerceAtMost(5)).toLong()
+        val cooldownDuration = (BASE_COOLDOWN_MS * backoffFactor).coerceAtMost(MAX_COOLDOWN_MS)
+        onlineCooldownUntilTimestamp = System.currentTimeMillis() + cooldownDuration
+        Log.i(TAG, "在线合成失败次数: $onlineFailureCount。激活冷却期 ${cooldownDuration}ms。")
+    }
+
+    /**
+     * 当在线合成成功或需要强制重置状态时调用。
+     * 它会清除失败计数和冷却时间戳，使系统可以立即恢复使用在线模式。
+     */
+    private fun resetOnlineCooldown() {
+        if (onlineFailureCount > 0 || onlineCooldownUntilTimestamp > 0L) {
+            Log.i(TAG, "在线合成恢复正常或被重置。清除失败计数和冷却期。")
+        }
+        onlineFailureCount = 0
+        onlineCooldownUntilTimestamp = 0L
     }
 }

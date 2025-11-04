@@ -8,7 +8,7 @@ class SynthesisStrategyManager(context: Context) {
     private val networkMonitor = NetworkMonitor(context.applicationContext)
 
     // 默认策略可以根据您的产品需求设定
-    var currentStrategy: TtsStrategy = TtsStrategy.OFFLINE_ONLY
+    var currentStrategy: TtsStrategy = TtsStrategy.ONLINE_PREFERRED
         private set
 
     val isNetworkGood: StateFlow<Boolean> = networkMonitor.isNetworkGood

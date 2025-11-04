@@ -1,6 +1,7 @@
 package com.qq.wx.offlinevoice.synthesizer.online
 
 import android.util.Log
+import com.qq.wx.offlinevoice.synthesizer.DecodedPcm
 import com.qq.wx.offlinevoice.synthesizer.Speaker
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.MediaType.Companion.toMediaType
@@ -13,6 +14,7 @@ object WxReaderApi : OnlineTtsApi {
 
     const val TAG = "WxReaderApi"
 
+
     override suspend fun fetchTtsAudio(
         text: String,
         speaker: Speaker
@@ -24,7 +26,7 @@ object WxReaderApi : OnlineTtsApi {
         json.put("model_name", speaker.modelName)
         json.put("style", 1)
         json.put("text_utf8", text)
-        json.put("token", "aXFhoMC5m8TT/RSpCQVYFrALGyh9TUVXTXkc3sydj9Qivwe4h5l+cR3NA7YI9QAq")
+        json.put("token", "vMZfAzT75s42LQ9Uf7tdocykZ4SSR21G+WM08HvvC/IgnVILQ8Mz34WHE2Sx+xtN")
         json.put("uid", 155027727)
         json.put("version", "9.3.8.10166907")
         json.put("busi_type", 1)
@@ -54,18 +56,18 @@ object WxReaderApi : OnlineTtsApi {
 
             override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
                 if (response.isSuccessful) {
-                    val responseBody = response.body?.string()
-                    if (responseBody != null) {
-                        val audioData = parseAudioData(responseBody)
-                        if (audioData != null) {
-                            ctx.resumeWith(Result.success(audioData))
-                        } else {
-                            Log.e(TAG, "音频数据解析失败:$responseBody")
-                            ctx.resumeWith(Result.failure(IOException("音频数据解析失败")))
+                    val responseBody = response.body.string()
+                    val result = parseAudioData(responseBody)
+                    result.onFailure {
+                        when (it) {
+                            is SessionExpiredException -> Log.e(TAG, "会话已过期，请重新获取token。")
+                            is WxApiException -> Log.e(TAG, "微信API错误，代码: ${it.errorCode}, 信息: ${it.message}")
+                            else -> Log.e(TAG, "解析音频数据失败: ${it.message}, 响应内容: $responseBody")
                         }
-                    } else {
-                        Log.e(TAG, "响应体为空:$response")
-                        ctx.resumeWith(Result.failure(IOException("响应体为空")))
+                        ctx.resumeWith(Result.failure(it))
+                    }.onSuccess {
+                        Log.d(TAG, "成功获取音频数据，长度: ${it.size} 字节")
+                        ctx.resumeWith(Result.success(it))
                     }
                 } else {
                     Log.e(TAG, "网络请求失败，状态码: ${response.code}")
@@ -75,14 +77,21 @@ object WxReaderApi : OnlineTtsApi {
         })
     }
 
-    private fun parseAudioData(responseBody: String): ByteArray? {
+    private fun parseAudioData(responseBody: String): Result<ByteArray> {
         val json = JSONObject(responseBody)
         val data = json.optString("audio_data", "")
-        return if (data.isNotEmpty()) {
+        if (data.isNotEmpty()) {
             // 解base64, 结果为mp3格式的byte数组
-            Base64.decode(data)
+            return runCatching { Base64.decode(data) }
         } else {
-            null
+            val baseResponse = json.optJSONObject("baseResponse")
+            val errMsg = baseResponse?.optString("msg", "未知错误") ?: "未知错误"
+            val errCode = baseResponse?.optInt("ret", -1) ?: -1
+            return if (errCode == -13) {
+                Result.failure(SessionExpiredException(errMsg))
+            } else {
+                Result.failure(WxApiException(errCode, errMsg))
+            }
         }
     }
 }
