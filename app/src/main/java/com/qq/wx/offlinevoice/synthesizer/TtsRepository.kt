@@ -33,6 +33,7 @@ class TtsRepository(
         speaker: Speaker,
         allowNetwork: Boolean = true // --- 1. 添加了缺失的 allowNetwork 参数，并提供默认值 ---
     ): DecodedPcm {
+        val text = text.trim()
         val cacheKey = createCacheKey(text, speaker)
 
         // 1. 首先检查缓存
@@ -46,16 +47,19 @@ class TtsRepository(
         mutex.withLock {
             try {
                 // 再次检查缓存
-                cache.get(cacheKey)?.let { return it }
+                cache.get(cacheKey)?.let {
+                    Log.d("TtsRepository", "缓存命中: $cacheKey, text: $text")
+                    return it
+                }
 
                 // --- 2. 新增的核心逻辑：在请求网络前检查 allowNetwork 标志 ---
                 if (!allowNetwork) {
                     // 如果缓存未命中且网络请求被禁止，则必须失败。
-                    throw IOException("缓存未命中，且网络请求被禁止 (例如：正处于冷却期)")
+                    throw IOException("缓存未命中，且网络请求被禁止 (例如：正处于冷却期), text: $text")
                 }
 
                 // 只有在允许网络请求时才继续
-                Log.d("TtsRepository", "缓存未命中，开始网络请求: $cacheKey")
+                Log.d("TtsRepository", "缓存未命中，开始网络请求: $cacheKey, text: $text")
                 val mp3Data = onlineApi.fetchTtsAudio(text, speaker)
                 val decodedPcm = mp3Decoder.decode(mp3Data)
 
@@ -64,7 +68,7 @@ class TtsRepository(
                 return decodedPcm
             } catch (e: Exception) {
                 // 在 Repository 层面记录带有上下文的详细日志
-                Log.e("TtsRepository", "获取或解码在线PCM失败: $cacheKey", e)
+                Log.e("TtsRepository", "获取或解码在线PCM失败: $cacheKey, text: ${text.trim()}")
                 // 将原始异常重新抛出，让调用方来决定如何处理
                 throw e
             } finally {

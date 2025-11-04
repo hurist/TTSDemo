@@ -88,7 +88,7 @@ class TtsSynthesizer(
     private var isPausedByError = false
     private var onlineAudioProcessor: AudioSpeedProcessor? = null
     private val processorMutex = Mutex()
-    private val splitterStrategy = SentenceSplitterStrategy.PUNCTUATION
+    private val splitterStrategy = SentenceSplitterStrategy.NEWLINE
 
     // --- 新增：在线模式回退与重试机制的状态变量 ---
     private var onlineFailureCount: Int = 0
@@ -445,11 +445,12 @@ class TtsSynthesizer(
 
     private suspend fun performOnlineSynthesis(index: Int, sentence: String): SynthesisResult {
         try {
-            if (sentence.trim().isEmpty()) {
+            val sentence = sentence.trim()
+            if (sentence.isEmpty()) {
                 Log.w(TAG, "句子 $index 内容为空，跳过在线合成。")
                 return SynthesisResult.Success
             }
-            Log.d(TAG, "正在尝试[在线路径]获取句子 $index: \"$sentence\"")
+            Log.d(TAG, "合成[在线]句子 $index: \"$sentence\"")
 
             // TtsRepository 会处理缓存检查和网络请求的逻辑
             // 即使在冷却期，Repository也会检查缓存，只是不会发起网络请求
@@ -490,8 +491,8 @@ class TtsSynthesizer(
             return SynthesisResult.Success
         } catch (e: Exception) {
             // 捕获所有来自 Repository 的异常 (如 IOException, WxApiException, DecodeException)
-            val reason = "在线路径失败 (句子 $index): ${e.message}"
-            Log.w(TAG, reason, if (e is IOException) null else e) // 避免为常见网络错误打印完整堆栈
+            val reason = "合成[在线] (句子 $index, ${sentence.trim()})失败: ${e.message}"
+            Log.w(TAG, reason/*, if (e is IOException) null else e*/) // 避免为常见网络错误打印完整堆栈
             return SynthesisResult.Failure(reason)
         }
     }
@@ -499,14 +500,15 @@ class TtsSynthesizer(
     private suspend fun performOfflineSynthesis(index: Int, sentence: String): SynthesisResult {
         return engineMutex.withLock {
             try {
-                if (sentence.trim().isEmpty()) {
+                val sentence = sentence.trim()
+                if (sentence.isEmpty()) {
                     Log.w(TAG, "句子 $index 内容为空，跳过离线合成。")
                     return@withLock SynthesisResult.Success
                 }
-                Log.d(TAG, "正在合成[离线]句子 $index: \"$sentence\"")
+                Log.d(TAG, "合成[离线]句子 $index: \"$sentence\"")
                 val prepare = prepareForSynthesis(sentence, currentSpeed, currentVolume)
                 if (prepare != 0) {
-                    val reason = "离线引擎准备失败 (code=$prepare) 句子: $sentence"
+                    val reason = "合成[离线]句子准备失败 (code=$prepare) 句子: $sentence"
                     Log.e(TAG, reason)
                     return@withLock SynthesisResult.Success
                 }
@@ -520,7 +522,7 @@ class TtsSynthesizer(
                 while (coroutineContext.isActive) {
                     val status = nativeEngine?.synthesize(pcmArray, TtsConstants.PCM_BUFFER_SIZE, synthResult, 1) ?: -1
                     if (status == -1) {
-                        val reason = "本地合成失败，状态码: -1"
+                        val reason = "合成[离线]句子合成失败，状态码: -1"
                         Log.e(TAG, reason)
                         return@withLock SynthesisResult.Success
                     }
@@ -545,9 +547,9 @@ class TtsSynthesizer(
                 }
                 SynthesisResult.Success
             } catch (e: CancellationException) {
-                SynthesisResult.Failure("协程被取消")
+                SynthesisResult.Failure("合成[离线](句子 $index, ${sentence.trim()})协程被取消")
             } catch (e: Exception) {
-                val reason = "离线合成异常: ${e.message}"
+                val reason = "合成[离线](句子 $index, ${sentence.trim()})异常: ${e.message}"
                 Log.e(TAG, reason, e)
                 SynthesisResult.Failure(reason)
             } finally {
