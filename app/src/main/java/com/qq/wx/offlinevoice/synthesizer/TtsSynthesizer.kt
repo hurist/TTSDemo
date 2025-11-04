@@ -2,6 +2,7 @@ package com.qq.wx.offlinevoice.synthesizer
 
 import android.content.Context
 import android.util.Log
+import com.qq.wx.offlinevoice.synthesizer.cache.TtsCacheImpl
 import com.qq.wx.offlinevoice.synthesizer.online.MediaCodecMp3Decoder
 import com.qq.wx.offlinevoice.synthesizer.online.Mp3Decoder
 import com.qq.wx.offlinevoice.synthesizer.online.OnlineTtsApi
@@ -73,8 +74,7 @@ class TtsSynthesizer(
     private var currentSpeaker = speaker
     private var currentCallback: TtsCallback? = null
     private val strategyManager: SynthesisStrategyManager
-    private val onlineApi: OnlineTtsApi
-    private val mp3Decoder: Mp3Decoder
+    private val ttsRepository: TtsRepository
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
     private val voiceDataPath: String
@@ -124,8 +124,10 @@ class TtsSynthesizer(
             pathBuilder
         )
         strategyManager = SynthesisStrategyManager(context.applicationContext)
-        onlineApi = WxReaderApi
-        mp3Decoder = MediaCodecMp3Decoder(context.applicationContext)
+        val onlineApi = WxReaderApi
+        val mp3Decoder = MediaCodecMp3Decoder(context.applicationContext)
+        val ttsCache = TtsCacheImpl(context.applicationContext)
+        ttsRepository = TtsRepository(onlineApi, mp3Decoder, ttsCache)
         scope.launch { commandProcessor() }
         if (instanceCount.incrementAndGet() == 1) {
             nativeEngine = SynthesizerNative()
@@ -437,15 +439,8 @@ class TtsSynthesizer(
                 return SynthesisResult.Success
             }
             Log.d(TAG, "正在合成[在线]句子 $index: \"$sentence\"")
-            val mp3Data = onlineApi.fetchTtsAudio(sentence, currentSpeaker)
+            val decoded = ttsRepository.getDecodedPcm(sentence, currentSpeaker)
 
-            if (!coroutineContext.isActive) return SynthesisResult.Failure("协程被取消")
-            if (mp3Data.isEmpty()) {
-                val reason = "在线API返回空音频"
-                Log.e(TAG, "$reason, 句子: \"$sentence\"")
-                return SynthesisResult.Failure(reason)
-            }
-            val decoded = mp3Decoder.decode(mp3Data)
             val pcmData = decoded.pcmData
             val sampleRate = decoded.sampleRate
             if (!coroutineContext.isActive) return SynthesisResult.Failure("协程被取消")
