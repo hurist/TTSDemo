@@ -40,8 +40,18 @@ class TtsRepository(
         val text = text.trim()
         val cacheKey = createCacheKey(text, speaker)
 
-        // 1. 首先检查缓存
-        cache.get(cacheKey)?.let { return it }
+        // 1) 无锁快速路径：先查 MP3 缓存
+        cache.get(cacheKey)?.let { mp3Bytes ->
+            val decoded = runCatching {
+                mp3Decoder.decode(mp3Bytes)
+            }.onFailure {
+                AppLogger.e("TtsRepository", "MP3缓存 解码失败，尝试重新请求网络: $cacheKey, text: $text", it)
+            }.getOrNull()
+            if (decoded != null) {
+                AppLogger.d("TtsRepository", "MP3 缓存命中: $cacheKey, text: $text")
+                return decoded
+            }
+        }
 
         // 获取或创建特定于此key的锁
         val mutex = mapMutex.withLock {
@@ -50,11 +60,7 @@ class TtsRepository(
 
         mutex.withLock {
             try {
-                // 再次检查缓存
-                cache.get(cacheKey)?.let {
-                    AppLogger.d("TtsRepository", "缓存命中: $cacheKey, text: $text")
-                    return it
-                }
+
 
                 // --- 2. 新增的核心逻辑：在请求网络前检查 allowNetwork 标志 ---
                 if (!allowNetwork) {
@@ -67,8 +73,9 @@ class TtsRepository(
                 val mp3Data = onlineApi.fetchTtsAudio(text, speaker)
                 val decodedPcm = mp3Decoder.decode(mp3Data)
 
-                // 成功后，存入缓存并返回
-                cache.put(cacheKey, decodedPcm)
+                // 2) 将成功获取并解码的结果存入缓存
+                cache.put(cacheKey, mp3Data)
+
                 return decodedPcm
             } catch (e: Exception) {
                 // 在 Repository 层面记录带有上下文的详细日志
