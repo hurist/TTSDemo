@@ -735,7 +735,7 @@ class TtsSynthesizer(
                         if (synthesisSentenceIndex == index) synthesisSentenceIndex++
                     }
                     is SynthesisResult.Deferred -> {
-                        AppLogger.i(TAG, "句子 $index 合成被延后（通常因保护期/会话切换），将稍后重试。")
+                        AppLogger.i(TAG, "句子 $index 合成被延后（通常因保护期/会话切换），将稍后重试。", important = true)
                         delay(200)
                     }
                     is SynthesisResult.Failure -> {
@@ -799,6 +799,7 @@ class TtsSynthesizer(
 
             val trimmed = sentence.trim()
             if (trimmed.isEmpty()) {
+                AppLogger.w(TAG, "句子 $index 内容为空，跳过在线合成。", important = true)
                 enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.ONLINE) {
                     if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, sentence, SynthesisMode.ONLINE))
                 }
@@ -808,6 +809,7 @@ class TtsSynthesizer(
                 return SynthesisResult.Success
             }
             AppLogger.d(TAG, "合成[在线]句子 $index: \"$trimmed\"", important = true)
+            val start = System.currentTimeMillis()
 
             val isCoolingDown = System.currentTimeMillis() < onlineCooldownUntilTimestamp
             val decoded = ttsRepository.getDecodedPcm(trimmed, currentSpeaker, allowNetwork = !isCoolingDown)
@@ -822,7 +824,8 @@ class TtsSynthesizer(
                 return SynthesisResult.Failure(reason)
             }
 
-            AppLogger.d(TAG, "在线合成句子 $index 成功，PCM 大小=${pcmData.size}, 采样率=$sampleRate, 句子：$trimmed", important = true)
+            val duration = System.currentTimeMillis() - start
+            AppLogger.d(TAG, "在线合成句子 $index 成功，PCM 大小=${pcmData.size}, 采样率=$sampleRate, 耗时：$duration ms, 句子：$trimmed", important = true)
 
             enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.ONLINE) {
                 if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, sentence, SynthesisMode.ONLINE))
