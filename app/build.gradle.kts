@@ -40,7 +40,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            //signingConfig = signingConfigs.getByName("signingConfig")
+            signingConfig = signingConfigs.getByName("signingConfig")
         }
     }
     compileOptions {
