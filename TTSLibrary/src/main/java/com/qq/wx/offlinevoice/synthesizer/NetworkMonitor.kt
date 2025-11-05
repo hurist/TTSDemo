@@ -36,15 +36,15 @@ class NetworkMonitor(context: Context) {
 
     private val networkCallback = object : ConnectivityManager.NetworkCallback() {
         override fun onAvailable(network: Network) {
-            Log.d(TAG, "onAvailable: 网络 $network 可用，检查其能力...")
+            AppLogger.d(TAG, "onAvailable: 网络 $network 可用，检查其能力...")
             scope.launch {
                 mutex.withLock {
                     val caps = connectivityManager.getNetworkCapabilities(network)
                     if (isNetworkConsideredValid(caps)) {
                         validNetworks.add(network)
-                        Log.i(TAG, "onAvailable: ✅ 网络 $network 有效，已添加。")
+                        AppLogger.i(TAG, "onAvailable: ✅ 网络 $network 有效，已添加。")
                     } else {
-                        Log.w(TAG, "onAvailable: ❌ 网络 $network 无效或被忽略。能力: $caps")
+                        AppLogger.w(TAG, "onAvailable: ❌ 网络 $network 无效或被忽略。能力: $caps")
                     }
                     updateStatus()
                 }
@@ -52,7 +52,7 @@ class NetworkMonitor(context: Context) {
         }
 
         override fun onLost(network: Network) {
-            Log.d(TAG, "onLost: 网络 $network 已丢失。$validNetworks")
+            AppLogger.d(TAG, "onLost: 网络 $network 已丢失。$validNetworks")
             scope.launch {
                 mutex.withLock {
                     validNetworks.remove(network)
@@ -62,16 +62,16 @@ class NetworkMonitor(context: Context) {
         }
 
         override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
-            Log.d(TAG, "onCapabilitiesChanged -> 网络: $network, 新能力: $caps")
+            AppLogger.d(TAG, "onCapabilitiesChanged -> 网络: $network, 新能力: $caps")
             scope.launch {
                 mutex.withLock {
                     if (isNetworkConsideredValid(caps)) {
                         if (validNetworks.add(network)) {
-                            Log.i(TAG, "onCapabilitiesChanged: ✅ 网络 $network 变为有效，已添加。$validNetworks")
+                            AppLogger.i(TAG, "onCapabilitiesChanged: ✅ 网络 $network 变为有效，已添加。$validNetworks")
                         }
                     } else {
                         if (validNetworks.remove(network)) {
-                            Log.w(TAG, "onCapabilitiesChanged: ❌ 网络 $network 变为无效或被忽略，已移除。$validNetworks")
+                            AppLogger.w(TAG, "onCapabilitiesChanged: ❌ 网络 $network 变为无效或被忽略，已移除。$validNetworks")
                         }
                     }
                     updateStatus()
@@ -96,43 +96,43 @@ class NetworkMonitor(context: Context) {
 
         try {
             connectivityManager.registerNetworkCallback(request, networkCallback)
-            Log.d(TAG, "网络回调注册成功。")
+            AppLogger.d(TAG, "网络回调注册成功。")
         } catch (e: Exception) {
-            Log.e(TAG, "注册网络回调失败: ${e.message}")
+            AppLogger.e(TAG, "注册网络回调失败: ${e.message}")
         }
     }
 
     private fun checkInitialState() {
         scope.launch {
             mutex.withLock {
-                Log.d(TAG, "--- 正在检查初始网络状态 ---")
+                AppLogger.d(TAG, "--- 正在检查初始网络状态 ---")
                 try {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                         val networks = connectivityManager.allNetworks
                         validNetworks.clear() // 清空，防止重复添加
-                        Log.d(TAG, "发现 ${networks.size} 个网络，开始遍历...")
+                        AppLogger.d(TAG, "发现 ${networks.size} 个网络，开始遍历...")
                         for (network in networks) {
                             val caps = connectivityManager.getNetworkCapabilities(network)
-                            Log.d(TAG, "检查网络: $network, 能力: $caps")
+                            AppLogger.d(TAG, "检查网络: $network, 能力: $caps")
                             if (isNetworkConsideredValid(caps)) {
-                                Log.i(TAG, "✅ 初始检查: 网络 $network 被认为是有效的，已添加。")
+                                AppLogger.i(TAG, "✅ 初始检查: 网络 $network 被认为是有效的，已添加。")
                                 validNetworks.add(network)
                             } else {
-                                Log.w(TAG, "❌ 初始检查: 网络 $network 无效或被忽略。")
+                                AppLogger.w(TAG, "❌ 初始检查: 网络 $network 无效或被忽略。")
                             }
                         }
                     } else {
                         val info = connectivityManager.activeNetworkInfo
-                        Log.d(TAG, "Android 5.x Fallback: activeNetworkInfo = $info")
+                        AppLogger.d(TAG, "Android 5.x Fallback: activeNetworkInfo = $info")
                         if (info != null && info.isConnected) {
                             _isNetworkGood.value = true
                         }
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "初始化网络状态检查失败: ${e.message}")
+                    AppLogger.e(TAG, "初始化网络状态检查失败: ${e.message}")
                 }
                 updateStatus()
-                Log.d(TAG, "--- 初始网络状态检查结束 ---")
+                AppLogger.d(TAG, "--- 初始网络状态检查结束 ---")
             }
         }
     }
@@ -168,7 +168,7 @@ class NetworkMonitor(context: Context) {
         }
 
         if (_isNetworkGood.value != newStatus) {
-            Log.i(TAG, "网络状态更新: isNetworkGood 从 ${_isNetworkGood.value} 变为 $newStatus. 有效网络数量: ${validNetworks.size}")
+            AppLogger.i(TAG, "网络状态更新: isNetworkGood 从 ${_isNetworkGood.value} 变为 $newStatus. 有效网络数量: ${validNetworks.size}")
             _isNetworkGood.value = newStatus
         }
     }
@@ -176,9 +176,9 @@ class NetworkMonitor(context: Context) {
     fun release() {
         try {
             connectivityManager.unregisterNetworkCallback(networkCallback)
-            Log.d(TAG, "网络回调已注销。")
+            AppLogger.d(TAG, "网络回调已注销。")
         } catch (e: Exception) {
-            Log.e(TAG, "注销网络回调失败: ${e.message}")
+            AppLogger.e(TAG, "注销网络回调失败: ${e.message}")
         }
         scope.cancel()
     }

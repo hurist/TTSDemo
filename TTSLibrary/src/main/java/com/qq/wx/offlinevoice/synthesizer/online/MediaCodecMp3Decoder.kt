@@ -5,6 +5,7 @@ import android.media.MediaCodec
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.util.Log
+import com.qq.wx.offlinevoice.synthesizer.AppLogger
 import com.qq.wx.offlinevoice.synthesizer.DecodedPcm
 import java.io.File
 import java.io.IOException
@@ -28,7 +29,7 @@ class MediaCodecMp3Decoder(private val context: Context) : Mp3Decoder {
         try {
             tempMp3File = File.createTempFile("temp_tts_audio", ".mp3", context.cacheDir)
             tempMp3File.writeBytes(mp3Data)
-            Log.d(TAG, "MP3数据已写入临时文件: ${tempMp3File.absolutePath}")
+            AppLogger.d(TAG, "MP3数据已写入临时文件: ${tempMp3File.absolutePath}")
 
             extractor = MediaExtractor()
             extractor.setDataSource(tempMp3File.absolutePath)
@@ -49,8 +50,8 @@ class MediaCodecMp3Decoder(private val context: Context) : Mp3Decoder {
             // 从格式中提取真实的采样率
             actualSampleRate = trackFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
             val mimeType = trackFormat.getString(MediaFormat.KEY_MIME) ?: throw IOException("MIME类型为空。")
-            Log.d(TAG, "从数据中解析出的格式: $trackFormat")
-            Log.i(TAG, "音频真实采样率: $actualSampleRate Hz")
+            AppLogger.d(TAG, "从数据中解析出的格式: $trackFormat")
+            AppLogger.i(TAG, "音频真实采样率: $actualSampleRate Hz")
 
             decoder = MediaCodec.createDecoderByType(mimeType)
             decoder.configure(trackFormat, null, null, 0)
@@ -86,14 +87,14 @@ class MediaCodecMp3Decoder(private val context: Context) : Mp3Decoder {
                         decoder.releaseOutputBuffer(outputBufferIndex, false)
                         if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
                             outputEos = true
-                            Log.d(TAG, "已到达输出流末尾(EOS)。")
+                            AppLogger.d(TAG, "已到达输出流末尾(EOS)。")
                         }
                     }
                     outputBufferIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
                         // MediaExtractor 方式通常不会在这里改变格式，但保留日志以防万一
                         val newFormat = decoder.outputFormat
                         actualSampleRate = newFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-                        Log.i(TAG, "输出格式已更改为: $newFormat, 新采样率: $actualSampleRate Hz")
+                        AppLogger.i(TAG, "输出格式已更改为: $newFormat, 新采样率: $actualSampleRate Hz")
                     }
                 }
             }
@@ -104,7 +105,7 @@ class MediaCodecMp3Decoder(private val context: Context) : Mp3Decoder {
                 System.arraycopy(chunk, 0, finalPcmData, currentPosition, chunk.size)
                 currentPosition += chunk.size
             }
-            Log.i(TAG, "解码成功完成。总PCM采样点数: $totalDecodedSize")
+            AppLogger.i(TAG, "解码成功完成。总PCM采样点数: $totalDecodedSize")
 
             if (actualSampleRate == -1) throw IOException("无法确定解码后的音频采样率。")
 
@@ -112,16 +113,16 @@ class MediaCodecMp3Decoder(private val context: Context) : Mp3Decoder {
             return DecodedPcm(finalPcmData, actualSampleRate)
 
         } catch (e: Exception) {
-            Log.e(TAG, "解码过程中发生错误。", e)
+            AppLogger.e(TAG, "解码过程中发生错误。", e)
             throw IOException("解码失败。", e)
         } finally {
-            Log.d(TAG, "正在释放资源。")
+            AppLogger.d(TAG, "正在释放资源。")
             try {
                 decoder?.stop()
                 decoder?.release()
                 extractor?.release()
             } catch (e: Exception) {
-                Log.e(TAG, "释放解码器或提取器时出错。", e)
+                AppLogger.e(TAG, "释放解码器或提取器时出错。", e)
             }
             tempMp3File?.delete()
         }

@@ -21,6 +21,7 @@ import kotlin.coroutines.resumeWithException
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 import androidx.core.content.edit
+import com.qq.wx.offlinevoice.synthesizer.AppLogger
 
 class WxReaderApi(private val context: Context) : OnlineTtsApi {
 
@@ -37,7 +38,7 @@ class WxReaderApi(private val context: Context) : OnlineTtsApi {
         // 从 SharedPreferences 加载 token
         token = sp.getString("token", token) ?: token
         uid = sp.getInt("uid", uid)
-        Log.d(TAG, "初始化 WxReaderApi，加载 token: $token")
+        AppLogger.d(TAG, "初始化 WxReaderApi，加载 token: $token")
     }
 
     // --- 优化 1: 创建一个共享的、配置合理的 OkHttpClient 实例 ---
@@ -87,7 +88,7 @@ class WxReaderApi(private val context: Context) : OnlineTtsApi {
                 .post(requestBody)
                 .build()
 
-            Log.d(TAG, "请求 TTS API: $text")
+            AppLogger.d(TAG, "请求 TTS API: $text")
             val response = client.newCall(request).await()
 
             // --- 步骤 2: 解析响应 ---
@@ -103,22 +104,22 @@ class WxReaderApi(private val context: Context) : OnlineTtsApi {
             // --- 步骤 3: 根据解析结果执行后续操作 ---
             return when (apiResponse) {
                 is ApiResponse.DirectAudio -> {
-                    Log.d(TAG, "成功获取 Base64 音频数据，长度: ${apiResponse.data.size} 字节")
+                    AppLogger.d(TAG, "成功获取 Base64 音频数据，长度: ${apiResponse.data.size} 字节")
                     apiResponse.data
                 }
                 is ApiResponse.AudioUrl -> {
-                    Log.d(TAG, "获取到音频 URL，开始下载: ${apiResponse.url}")
+                    AppLogger.d(TAG, "获取到音频 URL，开始下载: ${apiResponse.url}")
                     downloadAudioFromUrl(apiResponse.url)
                 }
             }
         } catch (e: WxApiException) {
             // 专门处理 API 异常，例如 Session 过期
-            Log.e(TAG, "WxApiException: code: ${e.errorCode}, message: ${e.message}", e)
+            AppLogger.e(TAG, "WxApiException: code: ${e.errorCode}, message: ${e.message}", e)
             throw e
 
         } catch (e: Exception) {
             // 统一捕获所有异常，简化错误处理
-            Log.e(TAG, "获取 TTS 音频失败: ${e.message}", e)
+            AppLogger.e(TAG, "获取 TTS 音频失败: ${e.message}", e)
             // 将所有异常统一包装或重新抛出为 IOException，方便上层处理
             throw IOException("获取 TTS 音频失败: ${e.message}", e)
         }
@@ -168,7 +169,7 @@ class WxReaderApi(private val context: Context) : OnlineTtsApi {
                 val baseResponse = json.optJSONObject("baseResponse")
                 val errMsg = baseResponse?.optString("msg", "未知错误") ?: "未知错误"
                 val errCode = baseResponse?.optInt("ret", -1) ?: -1
-                Log.w(TAG, "API 返回错误，代码: $errCode, 信息: $errMsg, 响应: $responseBody, token: $token, uid: $uid")
+                AppLogger.w(TAG, "API 返回错误，代码: $errCode, 信息: $errMsg, 响应: $responseBody, token: $token, uid: $uid")
                 if (errCode == -13) {
                     throw SessionExpiredException(errMsg)
                 } else {
@@ -184,10 +185,10 @@ class WxReaderApi(private val context: Context) : OnlineTtsApi {
     private suspend fun downloadAudioFromUrl(url: String): ByteArray {
         val request = Request.Builder().url(url).build()
         val startTime = System.currentTimeMillis()
-        Log.d(TAG, "开始下载音频: $url")
+        AppLogger.d(TAG, "开始下载音频: $url")
         val response = client.newCall(request).await()
         val endTime = System.currentTimeMillis()
-        Log.d(TAG, "音频下载完成，耗时 ${endTime - startTime} ms")
+        AppLogger.d(TAG, "音频下载完成，耗时 ${endTime - startTime} ms")
 
         response.use { res ->
             if (!res.isSuccessful) {

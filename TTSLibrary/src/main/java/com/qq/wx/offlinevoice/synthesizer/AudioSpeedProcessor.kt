@@ -16,9 +16,9 @@ class AudioSpeedProcessor(
     init {
         try {
             sonic = Sonic(sampleRate, numChannels)
-            Log.d("AudioSpeedProcessor", "Sonic instance created for sample rate $sampleRate")
+            AppLogger.d("AudioSpeedProcessor", "Sonic instance created for sample rate $sampleRate")
         } catch (e: Exception) {
-            Log.e("AudioSpeedProcessor", "Failed to create Sonic instance", e)
+            AppLogger.e("AudioSpeedProcessor", "Failed to create Sonic instance", e)
         }
     }
 
@@ -26,7 +26,7 @@ class AudioSpeedProcessor(
         if (sonic == null || this.currentSpeed == speed) return
         this.currentSpeed = speed
         sonic?.speed = speed
-        Log.d("AudioSpeedProcessor", "Sonic speed set to $speed")
+        AppLogger.d("AudioSpeedProcessor", "Sonic speed set to $speed")
     }
 
     /**
@@ -77,6 +77,6 @@ class AudioSpeedProcessor(
         // Sonic.java 没有显式的 release/close 方法，
         // 将其设为 null 以便垃圾回收即可。
         sonic = null
-        Log.d("AudioSpeedProcessor", "Sonic instance released.")
+        AppLogger.d("AudioSpeedProcessor", "Sonic instance released.")
     }
 }
