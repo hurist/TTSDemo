@@ -1,6 +1,8 @@
 package com.qq.wx.offlinevoice.synthesizer.online
 
+import android.content.Context
 import android.util.Log
+import android.widget.Toast
 import com.qq.wx.offlinevoice.synthesizer.Speaker
 import kotlinx.coroutines.suspendCancellableCoroutine
 import okhttp3.Call
@@ -18,11 +20,25 @@ import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
+import androidx.core.content.edit
 
-object WxReaderApi : OnlineTtsApi {
+class WxReaderApi(private val context: Context) : OnlineTtsApi {
 
-    private const val TAG = "WxReaderApi"
-    private const val TTS_API_URL = "https://ae.weixin.qq.com/aetts"
+    private val sp by lazy {
+        context.getSharedPreferences("wx_offline_tts_prefs", Context.MODE_PRIVATE)
+    }
+
+    private val TAG = "WxReaderApi"
+    private val TTS_API_URL = "https://ae.weixin.qq.com/aetts"
+    private var token = "iQn+rpIPR979fyiwMe18aHeFc7NZv2Fpjmy7QDTRI+sdpy/whyVwpSqc7BWgSVDd"
+    private var uid = 176267434
+
+    init {
+        // 从 SharedPreferences 加载 token
+        token = sp.getString("token", token) ?: token
+        uid = sp.getInt("uid", uid)
+        Log.d(TAG, "初始化 WxReaderApi，加载 token: $token")
+    }
 
     // --- 优化 1: 创建一个共享的、配置合理的 OkHttpClient 实例 ---
     // 这对于性能至关重要，可以复用连接池和线程。
@@ -50,6 +66,15 @@ object WxReaderApi : OnlineTtsApi {
             continuation.invokeOnCancellation {
                 cancel()
             }
+        }
+    }
+
+    override fun setToken(token: String, uid: Int) {
+        this.token = token
+        this.uid = uid
+        sp.edit {
+            putString("token", token)
+            putInt("uid", uid)
         }
     }
 
@@ -86,6 +111,11 @@ object WxReaderApi : OnlineTtsApi {
                     downloadAudioFromUrl(apiResponse.url)
                 }
             }
+        } catch (e: WxApiException) {
+            // 专门处理 API 异常，例如 Session 过期
+            Log.e(TAG, "WxApiException: code: ${e.errorCode}, message: ${e.message}", e)
+            throw e
+
         } catch (e: Exception) {
             // 统一捕获所有异常，简化错误处理
             Log.e(TAG, "获取 TTS 音频失败: ${e.message}", e)
@@ -106,8 +136,8 @@ object WxReaderApi : OnlineTtsApi {
             put("style", 1)
             put("text_utf8", text)
             // 注意：硬编码的 token 可能会过期，实际应用中应该动态获取
-            put("token", "84J7SVq9PWFNN9dqDSqq8o9GK4QcVV9Ppzw4y7P/tWTf9hnHsp0x2tkkdYAMP6L5")
-            put("uid", 155027727)
+            put("token", token)
+            put("uid", uid)
             put("version", "9.3.8.10166907")
             put("busi_type", 1)
             put("format", 0)
@@ -138,7 +168,7 @@ object WxReaderApi : OnlineTtsApi {
                 val baseResponse = json.optJSONObject("baseResponse")
                 val errMsg = baseResponse?.optString("msg", "未知错误") ?: "未知错误"
                 val errCode = baseResponse?.optInt("ret", -1) ?: -1
-                Log.w(TAG, "API 返回错误，代码: $errCode, 信息: $errMsg, 响应: $responseBody")
+                Log.w(TAG, "API 返回错误，代码: $errCode, 信息: $errMsg, 响应: $responseBody, token: $token, uid: $uid")
                 if (errCode == -13) {
                     throw SessionExpiredException(errMsg)
                 } else {

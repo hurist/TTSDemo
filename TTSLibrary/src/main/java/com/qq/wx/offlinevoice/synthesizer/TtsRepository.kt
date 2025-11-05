@@ -4,19 +4,23 @@ import android.util.Log
 import com.qq.wx.offlinevoice.synthesizer.cache.TtsCache
 import com.qq.wx.offlinevoice.synthesizer.online.Mp3Decoder
 import com.qq.wx.offlinevoice.synthesizer.online.OnlineTtsApi
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.io.IOException
 import java.security.MessageDigest
 
 class TtsRepository(
-    private val onlineApi: OnlineTtsApi,
+    val onlineApi: OnlineTtsApi,
     private val mp3Decoder: Mp3Decoder,
     private val cache: TtsCache
 ) {
     // 使用 Mutex 避免对同一个 key 的并发网络请求
     private val requestMutexes = mutableMapOf<String, Mutex>()
     private val mapMutex = Mutex()
+    private val scope = CoroutineScope(Dispatchers.IO)
 
     /**
      * 获取解码后的 PCM 数据。
@@ -94,5 +98,11 @@ class TtsRepository(
 
         // 将字节数组转换为十六进制字符串
         return result.joinToString("") { "%02x".format(it) }
+    }
+
+    fun clearCache() {
+        scope.launch {
+            cache.clear()
+        }
     }
 }

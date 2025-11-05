@@ -21,7 +21,7 @@ interface TtsCallback {
      * @param sentence 句子的文本
      * @param totalSentences 句子总数
      */
-    fun onSentenceStart(sentenceIndex: Int, sentence: String, totalSentences: Int) {}
+    fun onSentenceStart(sentenceIndex: Int, sentence: String, totalSentences: Int, mode: SynthesisMode) {}
     
     /**
      * 特定句子完成朗读时调用
@@ -63,4 +63,11 @@ interface TtsCallback {
      * @param errorMessage 错误描述
      */
     fun onError(errorMessage: String) {}
+
+    /**
+     * 日志回调
+     * @param logMessage 日志内容
+     * @param level 日志级别
+     */
+    fun onLog(level: AppLogger.Level, logMessage: String) {}
 }

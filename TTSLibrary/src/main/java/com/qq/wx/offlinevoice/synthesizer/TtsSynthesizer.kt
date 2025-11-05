@@ -2,8 +2,10 @@ package com.qq.wx.offlinevoice.synthesizer
 
 import android.content.Context
 import android.util.Log
+import android.widget.Toast
 import com.qq.wx.offlinevoice.synthesizer.cache.TtsCacheImpl
 import com.qq.wx.offlinevoice.synthesizer.online.MediaCodecMp3Decoder
+import com.qq.wx.offlinevoice.synthesizer.online.WxApiException
 import com.qq.wx.offlinevoice.synthesizer.online.WxReaderApi
 import java.nio.ShortBuffer
 import java.util.concurrent.atomic.AtomicInteger
@@ -29,7 +31,7 @@ import kotlin.properties.Delegates
  * TTS 合成器主类（Actor 模型）。
  *
  * 职责：
- * - 接收外部控制命令 (speak, stop, pause, setSpeed, setVoice, setVolume 等)；
+ * - 接收外部控制命令 (speak, stop, pause, setSpeed, setVoice, setVolume, seekToSentence 等)；
  * - 维护播放状态、句子队列与当前索引；
  * - 策略驱动（ONLINE_ONLY / ONLINE_PREFERRED / OFFLINE）与在线失败退避；
  * - 网络恢复哨兵（稳定窗口去抖，ONLINE_PREFERRED 下对未播部分升级在线）；
@@ -43,11 +45,18 @@ import kotlin.properties.Delegates
  *   删除大量散落的 mySession==synthesisSessionId 判断。
  * - 暂停期参数变更统一管理：pendingChanges 集合（SPEAKER/SPEED）；resume 时一次性“参数感知软重启”，
  *   从“当前句开头”用新参数重合成，避免旧参数音频泄漏。
+ *
+ * 新增功能（本次）：
+ * - seekToSentence：支持按句拖动进度。行为：
+ *   - PLAYING：立即切到目标句播放（清空队列、取消旧循环、从目标句重启）。
+ *   - PAUSED：立即更新进度索引（playingSentenceIndex），真正播放在恢复时生效（仅首次 seek 清队，防抖）。
+ *   - 目标为空句时：若不是最后一句则向后找第一个非空句，否则向前找第一个非空句；全空则保持不动。
  */
 class TtsSynthesizer(
-    context: Context,
+    private val context: Context,
     private val speaker: Speaker
 ) {
+
     private sealed class SynthesisResult {
         object Success : SynthesisResult()
         data class Failure(val reason: String) : SynthesisResult()
@@ -65,17 +74,33 @@ class TtsSynthesizer(
         object Stop : Command()
         object Release : Command()
         data class SetStrategy(val strategy: TtsStrategy) : Command()
-        data class InternalSentenceStart(val index: Int, val sentence: String) : Command()
+        data class InternalSentenceStart(val index: Int, val sentence: String, val mode: SynthesisMode) : Command()
         data class InternalSentenceEnd(val index: Int, val sentence: String) : Command()
         object InternalSynthesisFinished : Command()
         data class InternalError(val message: String) : Command()
+
+        // 新增：按句 seek 命令
+        data class SeekTo(val index: Int) : Command()
+    }
+
+    init {
+        AppLogger.initialize(context)
+        AppLogger.setCallback(object : AppLogger.Callback {
+            override fun onLogWritten(
+                level: AppLogger.Level,
+                tag: String,
+                msg: String
+            ) {
+                currentCallback?.onLog(level, "[$tag] $msg")
+            }
+        })
     }
 
     private var currentState: TtsPlaybackState = TtsPlaybackState.IDLE
     private val sentences = mutableListOf<String>()
     @Volatile private var playingSentenceIndex: Int = 0
     private var synthesisSentenceIndex by Delegates.observable(0) { _, oldValue, newValue ->
-        Log.d(TAG, "修改synthesisSentenceIndex： $oldValue -> $newValue")
+        AppLogger.d(TAG, "修改synthesisSentenceIndex： $oldValue -> $newValue")
     }
     private var currentSpeed: Float = 1.0f
     private var currentVolume: Float = 1.0f
@@ -117,6 +142,10 @@ class TtsSynthesizer(
     private enum class PendingChange { SPEAKER, SPEED }
     private val pendingChanges = mutableSetOf<PendingChange>()
 
+    // 新增：暂停期间的 seek 目标与防抖标记
+    @Volatile private var pendingSeekIndex: Int? = null
+    @Volatile private var pendingSeekScheduled: Boolean = false
+
     companion object {
         private const val TAG = "TtsSynthesizer"
         private val instanceCount = AtomicInteger(0)
@@ -149,7 +178,7 @@ class TtsSynthesizer(
         )
 
         strategyManager = SynthesisStrategyManager(context.applicationContext)
-        val onlineApi = WxReaderApi
+        val onlineApi = WxReaderApi(context)
         val mp3Decoder = MediaCodecMp3Decoder(context.applicationContext)
         val ttsCache = TtsCacheImpl(context.applicationContext)
         ttsRepository = TtsRepository(onlineApi, mp3Decoder, ttsCache)
@@ -173,6 +202,16 @@ class TtsSynthesizer(
     fun stop() = sendCommand(Command.Stop)
     fun release() = sendCommand(Command.Release)
     fun setStrategy(strategy: TtsStrategy) = sendCommand(Command.SetStrategy(strategy))
+
+    /**
+     * 新增：对外 seek API（按句跳转）
+     */
+    fun seekToSentence(index: Int) = sendCommand(Command.SeekTo(index))
+
+    fun setToken(token: String, uid: Int) {
+        ttsRepository.onlineApi.setToken(token, uid)
+    }
+
     fun isSpeaking(): Boolean = isPlaying.value
     fun getStatus(): TtsStatus {
         val i = playingSentenceIndex.coerceAtMost(sentences.size - 1).coerceAtLeast(0)
@@ -197,13 +236,13 @@ class TtsSynthesizer(
                 is Command.SetCallback -> { currentCallback = command.callback; currentCallback?.onInitialized(true) }
                 is Command.InternalSentenceStart -> {
                     playingSentenceIndex = command.index
-                    currentCallback?.onSentenceStart(command.index, command.sentence, sentences.size)
-                    Log.d(TAG, "修改句子索引为 ${command.index}: ${command.sentence}")
+                    currentCallback?.onSentenceStart(command.index, command.sentence, sentences.size, command.mode)
+                    AppLogger.d(TAG, "修改句子索引为 ${command.index}: ${command.sentence}")
                 }
                 is Command.InternalSentenceEnd -> {
                     currentCallback?.onSentenceComplete(command.index, command.sentence)
                     if (upgradeWindowActive && command.index == upgradeProtectedIndex) {
-                        Log.i(TAG, "受保护句 #$upgradeProtectedIndex 已结束，关闭升级窗口。")
+                        AppLogger.i(TAG, "受保护句 #$upgradeProtectedIndex 已结束，关闭升级窗口。")
                         upgradeWindowActive = false
                         upgradeProtectedIndex = -1
                     }
@@ -214,10 +253,13 @@ class TtsSynthesizer(
                 }
                 is Command.InternalSynthesisFinished -> { /* no-op */ }
                 is Command.InternalError -> {
-                    Log.e(TAG, "收到内部错误，将执行 handleStop: ${command.message}")
+                    AppLogger.e(TAG, "收到内部错误，将执行 handleStop: ${command.message}")
                     handleStop()
                     currentCallback?.onError(command.message)
                 }
+
+                // 新增：按句 seek 的处理
+                is Command.SeekTo -> handleSeekTo(command.index)
             }
         }
     }
@@ -231,7 +273,7 @@ class TtsSynthesizer(
         val old = sessionJob
         sessionJob = SupervisorJob()
         old?.cancel()
-        Log.i(TAG, "创建新的 SessionScope，旧会话已取消。")
+        AppLogger.i(TAG, "创建新的 SessionScope，旧会话已取消。")
         return CoroutineScope(Dispatchers.Default + sessionJob!!)
     }
 
@@ -240,11 +282,13 @@ class TtsSynthesizer(
     // ============ 命令实现 ============
     private suspend fun handleSpeak(text: String) {
         if (currentState == TtsPlaybackState.PLAYING || currentState == TtsPlaybackState.PAUSED) {
-            Log.d(TAG, "已有语音在播放中，将先停止当前任务再开始新的任务。")
+            AppLogger.d(TAG, "已有语音在播放中，将先停止当前任务再开始新的任务。")
             handleStop()
         }
         isPausedByError = false
         pendingChanges.clear()
+        pendingSeekIndex = null
+        pendingSeekScheduled = false
         sentences.clear()
 
         val result = when (splitterStrategy) {
@@ -253,7 +297,7 @@ class TtsSynthesizer(
         }
         sentences.addAll(result)
         if (sentences.isEmpty()) {
-            Log.w(TAG, "提供的文本中未找到有效句子。")
+            AppLogger.w(TAG, "提供的文本中未找到有效句子。", important = true)
             currentCallback?.onError("文本中没有有效的句子")
             return
         }
@@ -275,69 +319,69 @@ class TtsSynthesizer(
     private suspend fun handleSetSpeed(speed: Float) {
         val newSpeed = speed.coerceIn(0.5f, 3.0f)
         if (currentSpeed == newSpeed) {
-            Log.d(TAG, "setSpeed: 与当前速度一致($newSpeed)，忽略。")
+            AppLogger.d(TAG, "setSpeed: 与当前速度一致($newSpeed)，忽略。")
             return
         }
         currentSpeed = newSpeed
-        Log.i(TAG, "setSpeed: 设定新速度=$newSpeed")
+        AppLogger.i(TAG, "setSpeed: 设定新速度=$newSpeed")
 
         when (currentState) {
             TtsPlaybackState.PLAYING -> {
                 processorMutex.withLock { onlineAudioProcessor?.setSpeed(newSpeed) }
-                Log.i(TAG, "播放中修改速度，执行软重启以立即生效。")
+                AppLogger.i(TAG, "播放中修改速度，执行软重启以立即生效。")
                 softRestart()
             }
             TtsPlaybackState.PAUSED -> {
                 val first = pendingChanges.add(PendingChange.SPEED)
-                Log.i(TAG, "暂停中修改速度，记录待应用变更（首次=$first），恢复时从当前句开头用新速度播放。")
-                if (first) scheduleParamRestartWhilePaused("setSpeed")
+                AppLogger.i(TAG, "暂停中修改速度，记录待应用变更（首次=$first），恢复时从当前句开头用新速度播放。")
+                if (first && !pendingSeekScheduled) scheduleParamRestartWhilePaused("setSpeed")
             }
-            else -> Log.i(TAG, "IDLE 状态修改速度，将在下一次 speak 生效。")
+            else -> AppLogger.i(TAG, "IDLE 状态修改速度，将在下一次 speak 生效。")
         }
     }
 
     private suspend fun handleSetSpeaker(speaker: Speaker) {
         if (speaker == currentSpeaker) {
-            Log.d(TAG, "setVoice: 与当前 speaker 相同，忽略。")
+            AppLogger.d(TAG, "setVoice: 与当前 speaker 相同，忽略。")
             return
         }
         currentSpeaker = speaker
 
         when (currentState) {
             TtsPlaybackState.PLAYING -> {
-                Log.i(TAG, "播放中切换 speaker，执行软重启以立即生效。")
+                AppLogger.i(TAG, "播放中切换 speaker，执行软重启以立即生效。")
                 softRestart()
             }
             TtsPlaybackState.PAUSED -> {
                 val first = pendingChanges.add(PendingChange.SPEAKER)
-                Log.i(TAG, "暂停中切换 speaker，记录待应用变更（首次=$first），恢复时从当前句开头用新 speaker 播放。")
-                if (first) scheduleParamRestartWhilePaused("setVoice")
+                AppLogger.i(TAG, "暂停中切换 speaker，记录待应用变更（首次=$first），恢复时从当前句开头用新 speaker 播放。")
+                if (first && !pendingSeekScheduled) scheduleParamRestartWhilePaused("setVoice")
             }
-            else -> Log.i(TAG, "当前状态($currentState)切换 speaker，等待下一次 speak 生效。")
+            else -> AppLogger.i(TAG, "当前状态($currentState)切换 speaker，等待下一次 speak 生效。")
         }
     }
 
     private fun handleSetVolume(volume: Float) {
         val newVolume = volume.coerceIn(0.0f, 1.0f)
         if (currentVolume == newVolume) {
-            Log.d(TAG, "setVolume: 与当前音量一致($newVolume)，忽略。")
+            AppLogger.d(TAG, "setVolume: 与当前音量一致($newVolume)，忽略。")
             return
         }
         currentVolume = newVolume
         audioPlayer.setVolume(newVolume)
-        Log.i(TAG, "setVolume: 音量已设定为 $newVolume")
+        AppLogger.i(TAG, "setVolume: 音量已设定为 $newVolume")
     }
 
     private fun handlePause() {
         if (currentState != TtsPlaybackState.PLAYING && currentState != TtsPlaybackState.PAUSED) {
-            Log.w(TAG, "无法暂停，当前状态为 $currentState")
+            AppLogger.w(TAG, "无法暂停，当前状态为 $currentState")
             return
         }
         if (currentState == TtsPlaybackState.PAUSED) {
-            Log.d(TAG, "已经是暂停状态，无需再次操作。")
+            AppLogger.d(TAG, "已经是暂停状态，无需再次操作。")
             return
         }
-        if (isPausedByError) Log.w(TAG, "因合成失败自动暂停。") else isPausedByError = false
+        if (isPausedByError) AppLogger.w(TAG, "因合成失败自动暂停。") else isPausedByError = false
         audioPlayer.pause()
         updateState(TtsPlaybackState.PAUSED)
         currentCallback?.onPaused()
@@ -345,26 +389,30 @@ class TtsSynthesizer(
 
     /**
      * Resume：
-     * - 若 pendingChanges 非空（暂停期间改了 speaker/speed）或 isPausedByError 为真，则执行“参数感知软重启”：
+     * - 若 pendingChanges 非空（暂停期间改了 speaker/speed）或 isPausedByError 为真或存在 pendingSeekIndex，
+     *   则执行“参数感知软重启”：
      *   取消旧会话 -> 新建 SessionScope -> 取消旧合成循环 -> 清空播放器队列 ->
-     *   将 synthesisSentenceIndex 回拨到 playingSentenceIndex -> startSynthesis() ->
+     *   将 synthesisSentenceIndex 回拨到 pendingSeekIndex ?: playingSentenceIndex -> startSynthesis() ->
      *   resume()，从“当前句开头”用新参数重新播。
      */
     private suspend fun handleResume() {
         if (currentState != TtsPlaybackState.PAUSED) {
-            Log.w(TAG, "无法恢复，当前状态为 $currentState, 而非 PAUSED。")
+            AppLogger.w(TAG, "无法恢复，当前状态为 $currentState, 而非 PAUSED。")
             return
         }
 
         val needParamRestart = pendingChanges.isNotEmpty()
         val needErrorRestart = isPausedByError
+        val needSeekRestart = pendingSeekIndex != null
 
-        if (needParamRestart || needErrorRestart) {
-            Log.i(TAG, "恢复前需要重启合成：pendingChanges=$pendingChanges, isPausedByError=$needErrorRestart。")
-            val restartIndex = playingSentenceIndex
+        if (needParamRestart || needErrorRestart || needSeekRestart) {
+            AppLogger.i(TAG, "恢复前需要重启合成：pendingChanges=$pendingChanges, pendingSeekIndex=$pendingSeekIndex, isPausedByError=$needErrorRestart。")
+            val restartIndex = pendingSeekIndex ?: playingSentenceIndex
 
             // 清标志
             pendingChanges.clear()
+            pendingSeekIndex = null
+            pendingSeekScheduled = false
             isPausedByError = false
 
             // 重置会话作用域（取消旧会话）
@@ -373,16 +421,16 @@ class TtsSynthesizer(
             // 取消旧合成循环并等待退出
             synthesisJob?.cancelAndJoin()
             synthesisJob = null
-            Log.d(TAG, "恢复前：旧的合成任务已取消并结束。")
+            AppLogger.d(TAG, "恢复前：旧的合成任务已取消并结束。")
 
-            // 清空播放队列，回拨到当前句索引
+            // 清空播放队列，回拨到目标句索引
             audioPlayer.resetBlocking()
-            Log.d(TAG, "恢复前：播放器已同步重置（清空队列）。")
+            AppLogger.d(TAG, "恢复前：播放器已同步重置（清空队列）。")
             synthesisSentenceIndex = restartIndex
 
             // 新会话下启动合成
             startSynthesis()
-            Log.d(TAG, "恢复前：新的合成任务已从索引 $synthesisSentenceIndex 处启动（将用新参数重新合成当前句）。")
+            AppLogger.d(TAG, "恢复前：新的合成任务已从索引 $synthesisSentenceIndex 处启动（将用新参数/seek 重新合成当前句）。")
         }
 
         updateState(TtsPlaybackState.PLAYING)
@@ -399,33 +447,35 @@ class TtsSynthesizer(
      */
     private suspend fun handleStop() {
         if (currentState == TtsPlaybackState.IDLE) return
-        Log.d(TAG, "开始执行 handleStop...")
+        AppLogger.d(TAG, "开始执行 handleStop...")
 
         // 取消旧会话作用域（集中会话守卫）
         sessionJob?.cancel()
 
         isPausedByError = false
         pendingChanges.clear()
+        pendingSeekIndex = null
+        pendingSeekScheduled = false
 
         val jobToCancel = synthesisJob
         synthesisJob = null
         jobToCancel?.cancel()
 
         audioPlayer.stopAndReleaseBlocking()
-        Log.d(TAG, "播放器已完全停止并释放。")
+        AppLogger.d(TAG, "播放器已完全停止并释放。")
 
         sentences.clear()
         upgradeWindowActive = false
         upgradeProtectedIndex = -1
         updateState(TtsPlaybackState.IDLE)
-        Log.d(TAG, "状态已置为 IDLE。")
+        AppLogger.d(TAG, "状态已置为 IDLE。")
 
         appScope.launch {
             try {
                 jobToCancel?.join()
-                Log.d(TAG, "旧合成任务已退出。")
+                AppLogger.d(TAG, "旧合成任务已退出。")
             } catch (e: Exception) {
-                Log.w(TAG, "等待旧任务退出时异常: ${e.message}")
+                AppLogger.w(TAG, "等待旧任务退出时异常: ${e.message}")
             }
             processorMutex.withLock {
                 onlineAudioProcessor?.release()
@@ -453,7 +503,7 @@ class TtsSynthesizer(
      * - 从当前句索引重启合成。
      */
     private suspend fun softRestart() {
-        Log.d(TAG, "软重启请求，句子索引: $playingSentenceIndex")
+        AppLogger.d(TAG, "软重启请求，句子索引: $playingSentenceIndex")
         val restartIndex = playingSentenceIndex
 
         // 重置会话作用域
@@ -461,17 +511,17 @@ class TtsSynthesizer(
 
         synthesisJob?.cancelAndJoin()
         synthesisJob = null
-        Log.d(TAG, "旧的合成任务已取消并等待结束。")
+        AppLogger.d(TAG, "旧的合成任务已取消并等待结束。")
 
         audioPlayer.resetBlocking()
-        Log.d(TAG, "播放器已同步重置。")
+        AppLogger.d(TAG, "播放器已同步重置。")
 
         synthesisSentenceIndex = restartIndex
         startSynthesis()
-        Log.d(TAG, "新的合成任务已从索引 $restartIndex 处启动。")
+        AppLogger.d(TAG, "新的合成任务已从索引 $restartIndex 处启动。")
     }
 
-    // 暂停期：仅在“第一次新增变更项”时执行预备重启（防抖）
+    // 暂停期：仅在“第一次新增变更项/seek”时执行预备重启（防抖）
     private suspend fun scheduleParamRestartWhilePaused(reason: String) {
         // 新会话（取消旧会话，集中守卫）
         newSessionScope()
@@ -484,7 +534,102 @@ class TtsSynthesizer(
 
         // 清空播放队列
         audioPlayer.resetBlocking()
-        Log.d(TAG, "暂停中 $reason：已取消旧循环并清空播放队列，等待恢复时从当前句重启生效。")
+        AppLogger.d(TAG, "暂停中 $reason：已取消旧循环并清空播放队列，等待恢复时从当前句重启生效。")
+    }
+
+    // ============ 新增：Seek 相关实现 ============
+
+    /**
+     * 处理 seek 命令：
+     * - 规范化目标句（跳过空句，方向优先向后，末尾向前）；
+     * - PLAYING：立即生效（会话隔离、清队、从目标句重启合成），并立即更新 playingSentenceIndex；
+     * - PAUSED：立即更新 playingSentenceIndex，并记录 pendingSeekIndex；
+     *         仅第一次 seek 时清队（scheduleParamRestartWhilePaused 防抖），恢复时统一生效。
+     */
+    private suspend fun handleSeekTo(requestedIndex: Int) {
+        if (sentences.isEmpty()) {
+            AppLogger.w(TAG, "handleSeekTo: 当前没有可用句子，忽略 seek 请求(index=$requestedIndex)。")
+            return
+        }
+        val target = resolveSeekIndex(requestedIndex)
+        if (target == playingSentenceIndex) {
+            AppLogger.i(TAG, "handleSeekTo: 目标句与当前句相同(index=$target)，按规则忽略。")
+            return
+        }
+
+        when (currentState) {
+            TtsPlaybackState.PLAYING -> {
+                // 立即生效
+                AppLogger.i(TAG, "handleSeekTo: 播放中收到 seek 到句子 #$target，立即切换。")
+                playingSentenceIndex = target // 进度立即更新
+                // 会话隔离与硬清队
+                newSessionScope()
+                synthesisJob?.cancelAndJoin()
+                synthesisJob = null
+                audioPlayer.resetBlocking()
+                AppLogger.d(TAG, "handleSeekTo: 播放中，已取消旧任务并清空队列，准备从 #$target 重启。")
+                synthesisSentenceIndex = target
+                startSynthesis()
+                AppLogger.d(TAG, "handleSeekTo: 新的合成任务已从索引 $target 启动。")
+            }
+            TtsPlaybackState.PAUSED -> {
+                // 暂停：立即更新索引，延后生效，防抖清队
+                AppLogger.i(TAG, "handleSeekTo: 暂停中收到 seek 到句子 #$target，将在恢复时生效，进度立即更新。")
+                playingSentenceIndex = target // 进度立即更新
+                pendingSeekIndex = target
+                if (!pendingSeekScheduled) {
+                    scheduleParamRestartWhilePaused("seekTo")
+                    pendingSeekScheduled = true
+                } else {
+                    AppLogger.d(TAG, "handleSeekTo: 暂停期已预备重启过，本次 seek 不再重复清队。")
+                }
+            }
+            else -> {
+                AppLogger.w(TAG, "handleSeekTo: 当前状态($currentState)不支持立即 seek。建议在 speak 后或恢复/播放中使用。", important = true)
+            }
+        }
+    }
+
+    /**
+     * 解析并归一化 seek 目标：
+     * - 越界裁切；
+     * - 若目标句为空：
+     *   - 若不是最后一句：沿“向后”方向跳过连续空句，找到第一个非空句；
+     *   - 否则（位于末尾）：沿“向前”方向跳过连续空句，找到第一个非空句；
+     * - 若全为空（极端）：保持不动（返回 playingSentenceIndex），并打印警告。
+     */
+    private fun resolveSeekIndex(requestedIndex: Int): Int {
+        if (sentences.isEmpty()) return 0
+        val clamped = requestedIndex.coerceIn(0, sentences.size - 1)
+
+        fun isEmptyAt(i: Int): Boolean {
+            if (i !in sentences.indices) return true
+            return sentences[i].trim().isEmpty()
+        }
+
+        if (!isEmptyAt(clamped)) return clamped
+
+        // 优先向后（非最后一句时）
+        if (clamped < sentences.lastIndex) {
+            var i = clamped + 1
+            while (i <= sentences.lastIndex && isEmptyAt(i)) i++
+            if (i <= sentences.lastIndex) {
+                AppLogger.d(TAG, "resolveSeekIndex: 目标为空句，按规则向后跳至第一个非空句 index=$i", important = true)
+                return i
+            }
+        }
+
+        // 向前寻找
+        var j = (clamped - 1).coerceAtLeast(0)
+        while (j >= 0 && isEmptyAt(j)) j--
+        if (j >= 0) {
+            AppLogger.d(TAG, "resolveSeekIndex: 目标为空句且位于末尾或后续也为空，向前跳至第一个非空句 index=$j", important = true)
+            return j
+        }
+
+        // 全为空：保持现状
+        AppLogger.w(TAG, "resolveSeekIndex: 文本全为空或无法找到非空句，保持当前索引不变 index=$playingSentenceIndex")
+        return playingSentenceIndex
     }
 
     // ============ 合成逻辑 ============
@@ -515,18 +660,18 @@ class TtsSynthesizer(
                             // 稳定窗口去抖
                             delay(NETWORK_STABILIZE_MS)
                             if (!strategyManager.isNetworkGood.value) {
-                                Log.i(TAG, "网络恢复检测在稳定窗口后失效，取消本次升级触发。")
+                                AppLogger.i(TAG, "网络恢复检测在稳定窗口后失效，取消本次升级触发。")
                                 wasNetworkBad = !strategyManager.isNetworkGood.value
                                 return@collect
                             }
                             if (!isSessionActive()) return@collect
                             if (upgradeWindowActive) {
-                                Log.i(TAG, "升级窗口仍在进行，忽略重复触发。")
+                                AppLogger.i(TAG, "升级窗口仍在进行，忽略重复触发。")
                                 wasNetworkBad = !strategyManager.isNetworkGood.value
                                 return@collect
                             }
                             resetOnlineCooldown()
-                            Log.i(TAG, "网络已恢复且通过稳定窗口。执行升级：软重启合成循环并进入升级窗口（保护期）。")
+                            AppLogger.i(TAG, "网络已恢复且通过稳定窗口。执行升级：软重启合成循环并进入升级窗口（保护期）。")
 
                             synthesisLoopJob?.cancelAndJoin()
 
@@ -538,10 +683,10 @@ class TtsSynthesizer(
 
                             synthesisSentenceIndex = protectedIndex + 1
                             if (synthesisSentenceIndex < sentences.size) {
-                                Log.i(TAG, "将从句子 $synthesisSentenceIndex 处重新开始在线合成（升级窗口生效中）。")
+                                AppLogger.i(TAG, "将从句子 $synthesisSentenceIndex 处重新开始在线合成（升级窗口生效中）。")
                                 runSynthesisLoop()
                             } else {
-                                Log.i(TAG, "所有句子均已播放或正在播放，无需重启合成。")
+                                AppLogger.i(TAG, "所有句子均已播放或正在播放，无需重启合成。")
                             }
                         }
                         wasNetworkBad = !isNetworkGood
@@ -573,10 +718,10 @@ class TtsSynthesizer(
                         } else {
                             activateOnlineCooldown()
                             if (sessionStrategy == TtsStrategy.ONLINE_PREFERRED) {
-                                Log.w(TAG, "在线路径失败(缓存未命中/无PCM或API错误)，回退至[离线模式]。原因: ${(onlineResult as? SynthesisResult.Failure)?.reason ?: "unknown"}")
+                                AppLogger.w(TAG, "在线路径失败(缓存未命中/无PCM或API错误)，回退至[离线模式]。原因: ${(onlineResult as? SynthesisResult.Failure)?.reason ?: "unknown"}")
                                 performOfflineSynthesis(index, sentence)
                             } else {
-                                Log.e(TAG, "纯在线模式合成失败，无可用回退。原因: ${(onlineResult as? SynthesisResult.Failure)?.reason ?: "unknown"}")
+                                AppLogger.e(TAG, "纯在线模式合成失败，无可用回退。原因: ${(onlineResult as? SynthesisResult.Failure)?.reason ?: "unknown"}")
                                 onlineResult
                             }
                         }
@@ -586,22 +731,22 @@ class TtsSynthesizer(
 
                 when (finalResult) {
                     is SynthesisResult.Success -> {
-                        Log.d(TAG, "处理合成位置：synthesisSentenceIndex:$synthesisSentenceIndex, index:$index")
+                        AppLogger.d(TAG, "处理合成位置：synthesisSentenceIndex:$synthesisSentenceIndex, index:$index")
                         if (synthesisSentenceIndex == index) synthesisSentenceIndex++
                     }
                     is SynthesisResult.Deferred -> {
-                        Log.i(TAG, "句子 $index 合成被延后（通常因保护期/会话切换），将稍后重试。")
+                        AppLogger.i(TAG, "句子 $index 合成被延后（通常因保护期/会话切换），将稍后重试。")
                         delay(200)
                     }
                     is SynthesisResult.Failure -> {
-                        Log.e(TAG, "句子 $index 合成最终失败 (策略: $sessionStrategy): ${finalResult.reason}")
+                        AppLogger.e(TAG, "句子 $index 合成最终失败 (策略: $sessionStrategy): ${finalResult.reason}")
                         synthesisFailed = true
                         break
                     }
                 }
             }
         } catch (_: CancellationException) {
-            Log.d(TAG, "合成循环被取消。")
+            AppLogger.d(TAG, "合成循环被取消。")
         } finally {
             val stillActive = coroutineContext.isActive && isSessionActive()
             if (stillActive) {
@@ -611,7 +756,7 @@ class TtsSynthesizer(
                     if (onlineAudioProcessor != null) {
                         finalPcm = onlineAudioProcessor?.flush()
                         finalSampleRate = onlineAudioProcessor?.sampleRate
-                        Log.d(TAG, "Flushing audio processor, got ${finalPcm?.size ?: 0} final samples.")
+                        AppLogger.d(TAG, "Flushing audio processor, got ${finalPcm?.size ?: 0} final samples.")
                     }
                 }
 
@@ -626,18 +771,18 @@ class TtsSynthesizer(
                 }
 
                 if (isSessionActive() && coroutineContext.isActive) {
-                    Log.i(TAG, "合成循环结束(活动会话)。发送EOS。失败标志: $synthesisFailed")
+                    AppLogger.i(TAG, "合成循环结束(活动会话)。发送EOS。失败标志: $synthesisFailed")
                     enqueueEndOfStreamGuarded {
                         if (synthesisFailed) {
                             isPausedByError = true
                             sendCommand(Command.Pause)
                         } else {
-                            Log.i(TAG, "所有句子正常合成完毕，等待播放结束...")
+                            AppLogger.i(TAG, "所有句子正常合成完毕，等待播放结束...")
                         }
                     }
                 }
             } else {
-                Log.i(TAG, "合成循环结束（会话已取消或协程不活跃），跳过 flush/EOS。")
+                AppLogger.i(TAG, "合成循环结束（会话已取消或协程不活跃），跳过 flush/EOS。")
             }
         }
     }
@@ -655,14 +800,14 @@ class TtsSynthesizer(
             val trimmed = sentence.trim()
             if (trimmed.isEmpty()) {
                 enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.ONLINE) {
-                    if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, sentence))
+                    if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, sentence, SynthesisMode.ONLINE))
                 }
                 enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_END, SynthesisMode.ONLINE) {
                     if (isSessionActive()) sendCommand(Command.InternalSentenceEnd(index, sentence))
                 }
                 return SynthesisResult.Success
             }
-            Log.d(TAG, "合成[在线]句子 $index: \"$trimmed\"")
+            AppLogger.d(TAG, "合成[在线]句子 $index: \"$trimmed\"", important = true)
 
             val isCoolingDown = System.currentTimeMillis() < onlineCooldownUntilTimestamp
             val decoded = ttsRepository.getDecodedPcm(trimmed, currentSpeaker, allowNetwork = !isCoolingDown)
@@ -673,12 +818,14 @@ class TtsSynthesizer(
             val sampleRate = decoded.sampleRate
             if (pcmData.isEmpty()) {
                 val reason = "在线合成未产出PCM（非空句），index=$index"
-                Log.w(TAG, reason)
+                AppLogger.w(TAG, reason, important = true)
                 return SynthesisResult.Failure(reason)
             }
 
+            AppLogger.d(TAG, "在线合成句子 $index 成功，PCM 大小=${pcmData.size}, 采样率=$sampleRate, 句子：$trimmed", important = true)
+
             enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.ONLINE) {
-                if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, sentence))
+                if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, sentence, SynthesisMode.ONLINE))
             }
 
             processorMutex.withLock {
@@ -686,7 +833,7 @@ class TtsSynthesizer(
                     onlineAudioProcessor?.release()
                     onlineAudioProcessor = AudioSpeedProcessor(sampleRate)
                     onlineAudioProcessor?.setSpeed(currentSpeed)
-                    Log.i(TAG, "Online audio sample rate is $sampleRate, created new AudioSpeedProcessor.")
+                    AppLogger.i(TAG, "Online audio sample rate is $sampleRate, created new AudioSpeedProcessor.")
                 } else {
                     onlineAudioProcessor?.setSpeed(currentSpeed)
                 }
@@ -707,8 +854,9 @@ class TtsSynthesizer(
             }
             return SynthesisResult.Success
         } catch (e: Exception) {
-            val reason = "合成[在线] (句子 $index, ${sentence.trim()})失败: ${e.message}"
-            Log.w(TAG, reason)
+            val code = (e as? WxApiException)?.errorCode
+            val reason = "合成[在线] (句子 $index)失败: ${e.message}, code=$code"
+            AppLogger.e(TAG, reason, important = true)
             return SynthesisResult.Failure(reason)
         }
     }
@@ -721,7 +869,7 @@ class TtsSynthesizer(
     private suspend fun performOfflineSynthesis(index: Int, sentence: String): SynthesisResult {
         if (!coroutineContext.isActive || !isSessionActive()) return SynthesisResult.Deferred
         if (audioPlayer.isInProtection() && index != audioPlayer.getProtectedSentenceIndex()) {
-            Log.i(TAG, "离线合成请求被延后：当前处于保护期，受保护句=${audioPlayer.getProtectedSentenceIndex()}，请求句=$index")
+            AppLogger.i(TAG, "离线合成请求被延后：当前处于保护期，受保护句=${audioPlayer.getProtectedSentenceIndex()}，请求句=$index")
             return SynthesisResult.Deferred
         }
 
@@ -729,23 +877,23 @@ class TtsSynthesizer(
             try {
                 val trimmed = sentence.trim()
                 if (trimmed.isEmpty()) {
-                    Log.w(TAG, "句子 $index 内容为空，跳过离线合成。")
+                    AppLogger.w(TAG, "句子 $index 内容为空，跳过离线合成。", important = true)
                     return@withLock SynthesisResult.Success
                 }
                 if (!coroutineContext.isActive || !isSessionActive()) {
-                    Log.i(TAG, "离线合成开始前会话不活跃/已取消，index=$index -> Deferred")
+                    AppLogger.i(TAG, "离线合成开始前会话不活跃/已取消，index=$index -> Deferred")
                     return@withLock SynthesisResult.Deferred
                 }
 
-                Log.d(TAG, "合成[离线]句子 $index: \"$trimmed\"")
+                AppLogger.d(TAG, "合成[离线]句子 $index: \"$trimmed\"", important = true)
                 val prepare = prepareForSynthesis(trimmed, currentSpeed, currentVolume)
                 if (prepare != 0) {
                     val reason = "合成[离线]句子准备失败 (code=$prepare) 句子: $trimmed"
-                    Log.e(TAG, "prepare 失败：$reason（按成功跳过处理，避免打断整体流程）")
+                    AppLogger.e(TAG, "prepare 失败：$reason（按成功跳过处理，避免打断整体流程）")
                     return@withLock SynthesisResult.Success
                 }
 
-                val startCb = { if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, trimmed)) }
+                val startCb = { if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, trimmed, SynthesisMode.OFFLINE)) }
                 val endCb = { if (isSessionActive()) sendCommand(Command.InternalSentenceEnd(index, trimmed)) }
 
                 val synthResult = IntArray(1)
@@ -753,14 +901,14 @@ class TtsSynthesizer(
                 var hasStart = false
                 while (coroutineContext.isActive && isSessionActive()) {
                     if (audioPlayer.isInProtection() && index != audioPlayer.getProtectedSentenceIndex()) {
-                        Log.i(TAG, "离线合成过程中进入/仍在保护期，句子 $index 延后（Deferred）。")
+                        AppLogger.i(TAG, "离线合成过程中进入/仍在保护期，句子 $index 延后（Deferred）。", important = true)
                         return@withLock SynthesisResult.Deferred
                     }
 
                     val status = nativeEngine?.synthesize(pcmArray, TtsConstants.PCM_BUFFER_SIZE, synthResult, 1) ?: -1
                     if (status == -1) {
                         val reason = "合成[离线]句子合成失败，状态码: -1"
-                        Log.e(TAG, reason)
+                        AppLogger.e(TAG, reason, important = true)
                         return@withLock SynthesisResult.Success
                     }
                     val num = synthResult[0]
@@ -781,6 +929,7 @@ class TtsSynthesizer(
                     }
                     delay(1)
                 }
+                AppLogger.d(TAG, "离线合成句子 $index 完成。 句子：$trimmed", important = true)
                 if (coroutineContext.isActive && isSessionActive()) {
                     if (!hasStart) {
                         enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.OFFLINE, startCb)
@@ -792,7 +941,7 @@ class TtsSynthesizer(
                 SynthesisResult.Failure("合成[离线](句子 $index, ${sentence.trim()})协程被取消")
             } catch (e: Exception) {
                 val reason = "合成[离线](句子 $index, ${sentence.trim()})异常: ${e.message}"
-                Log.e(TAG, reason, e)
+                AppLogger.e(TAG, reason, e, important = true)
                 SynthesisResult.Failure(reason)
             } finally {
                 nativeEngine?.reset()
@@ -865,16 +1014,25 @@ class TtsSynthesizer(
         val backoffFactor = (1 shl (onlineFailureCount - 1).coerceAtMost(5)).toLong() // 1,2,4,8,16,32
         val cooldownDuration = (BASE_COOLDOWN_MS * backoffFactor).coerceAtMost(MAX_COOLDOWN_MS)
         onlineCooldownUntilTimestamp = System.currentTimeMillis() + cooldownDuration
-        Log.i(TAG, "在线合成失败次数: $onlineFailureCount。激活冷却期 ${cooldownDuration}ms。")
+        AppLogger.i(TAG, "在线合成失败次数: $onlineFailureCount。激活冷却期 ${cooldownDuration}ms。")
     }
 
     private fun resetOnlineCooldown() {
         if (onlineFailureCount > 0 || onlineCooldownUntilTimestamp > 0L) {
-            Log.i(TAG, "在线合成恢复正常或被重置。清除失败计数和冷却期。")
+            AppLogger.i(TAG, "在线合成恢复正常或被重置。清除失败计数和冷却期。")
         }
         onlineFailureCount = 0
         onlineCooldownUntilTimestamp = 0L
     }
 
     fun getVoiceDataPath(): String = voiceDataPath
+
+    fun clearCache() {
+        if (currentState != TtsPlaybackState.IDLE) {
+            AppLogger.w(TAG, "clearCache: 当前状态非 IDLE，清理缓存可能影响正在进行的合成任务。停止后再操作")
+            Toast.makeText(context, "请在停止合成后再清理缓存", Toast.LENGTH_SHORT).show()
+            return
+        }
+        ttsRepository.clearCache()
+    }
 }

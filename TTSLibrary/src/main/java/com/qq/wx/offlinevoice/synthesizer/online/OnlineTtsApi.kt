@@ -9,4 +9,6 @@ interface OnlineTtsApi {
      * @throws IOException for network errors
      */
     suspend fun fetchTtsAudio(text: String, speaker: Speaker): ByteArray
+
+    fun setToken(token: String, uid: Int)
 }

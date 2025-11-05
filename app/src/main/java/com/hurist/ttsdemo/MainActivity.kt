@@ -16,7 +16,9 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
+import com.google.android.material.slider.Slider
 import com.qq.wx.offlinevoice.synthesizer.Speaker
+import com.qq.wx.offlinevoice.synthesizer.SynthesisMode
 import com.qq.wx.offlinevoice.synthesizer.TtsCallback
 import com.qq.wx.offlinevoice.synthesizer.TtsPlaybackState
 import com.qq.wx.offlinevoice.synthesizer.TtsSynthesizer
@@ -27,6 +29,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
+import androidx.core.content.edit
+import com.qq.wx.offlinevoice.synthesizer.AppLogger
 
 /**
  * 主Activity - TTS演示应用
@@ -44,6 +48,7 @@ class MainActivity : AppCompatActivity() {
 
     // UI组件
     private lateinit var editTextInput: EditText
+    private lateinit var tokenInput: EditText
     private lateinit var seekBarSpeed: SeekBar
     private lateinit var spinnerVoice: Spinner
     private lateinit var buttonPlay: Button
@@ -51,6 +56,14 @@ class MainActivity : AppCompatActivity() {
     private lateinit var buttonStop: Button
     private lateinit var textViewStatus: TextView
     private lateinit var textViewSpeed: TextView
+    private lateinit var progressSlider: Slider
+    private lateinit var btnClear: Button
+    private lateinit var uidInput: EditText
+    private lateinit var logView: LogRecyclerView
+
+    private val sp by lazy {
+        getSharedPreferences("prefs", Context.MODE_PRIVATE)
+    }
 
 
     private val speakers = listOf(
@@ -80,6 +93,10 @@ class MainActivity : AppCompatActivity() {
     )
     private var currentVoice: Speaker = speakers[0]
 
+    private var token = "yOqsngQ5CQ16j091qU8Rgvu/v5VskVLSnkjWORlDIrfQi+7DvEJoeiKv7MdsXY7o"
+    private var uid = 925813821
+    private var gen = 1 // 每次要修改token, uid的硬编码时, 都要修改这个值
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -89,6 +106,16 @@ class MainActivity : AppCompatActivity() {
             v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
             insets
         }
+
+        val lastGen = sp.getInt("gen", -1)
+        if (gen != lastGen) {
+            sp.edit { putInt("gen", gen) }
+            sp.edit { putString("token", token) }
+            sp.edit { putInt("uid", uid) }
+        }
+
+        token = sp.getString("token", token) ?: token
+        uid = sp.getInt("uid", uid)
 
         // 初始化UI组件
         initViews()
@@ -117,6 +144,13 @@ class MainActivity : AppCompatActivity() {
         buttonStop = findViewById(R.id.buttonStop)
         textViewStatus = findViewById(R.id.textViewStatus)
         textViewSpeed = findViewById(R.id.textViewSpeed)
+        progressSlider = findViewById(R.id.progress)
+        btnClear = findViewById(R.id.buttonClear)
+        tokenInput = findViewById(R.id.tokenInput)
+        uidInput = findViewById(R.id.uidInput)
+        logView = findViewById(R.id.logRecyclerView)
+        tokenInput.setText(token)
+        uidInput.setText(uid.toString())
 
         // 设置默认文本
         editTextInput.setText(text)
@@ -163,6 +197,14 @@ class MainActivity : AppCompatActivity() {
         // 设置按钮点击事件
         buttonPlay.setOnClickListener {
             val text = editTextInput.text.toString().trim()
+            val token = tokenInput.text.toString().trim()
+            val uidText = uidInput.text.toString().trim()
+
+            sp.edit { putString("token", token) }
+            sp.edit { putInt("uid", uidText.toInt()) }
+            tts?.setToken(token, if (uidText.isNotEmpty()) uidText.toInt() else 0)
+
+
             if (text.isNotEmpty()) {
                 tts?.speak(text)
             } else {
@@ -181,6 +223,23 @@ class MainActivity : AppCompatActivity() {
         buttonStop.setOnClickListener {
             tts?.stop()
         }
+
+        btnClear.setOnClickListener {
+            tts?.clearCache()
+            logView.clearLogs()
+        }
+
+        progressSlider.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
+            override fun onStartTrackingTouch(slider: Slider) {
+
+            }
+
+            override fun onStopTrackingTouch(slider: Slider) {
+                val sentenceIndex = slider.value.toInt() - 1
+                tts?.seekToSentence(sentenceIndex)
+            }
+
+        })
     }
 
     /**
@@ -215,11 +274,17 @@ class MainActivity : AppCompatActivity() {
             override fun onSentenceStart(
                 sentenceIndex: Int,
                 sentence: String,
-                totalSentences: Int
+                totalSentences: Int,
+                mode: SynthesisMode
             ) {
                 Log.d(TAG, "开始播放第 $sentenceIndex 句，共 $totalSentences 句")
                 runOnUiThread {
-                    updateStatus("播放中: ${sentenceIndex + 1}/$totalSentences, 当前句: $sentence")
+                    progressSlider.apply {
+                        valueFrom = 1f
+                        valueTo = totalSentences.toFloat()
+                        value = sentenceIndex.toFloat() + 1
+                    }
+                    updateStatus("播放中: ${sentenceIndex + 1}/$totalSentences, 当前句[$mode]: ${sentence.trim()}")
                 }
             }
 
@@ -272,6 +337,12 @@ class MainActivity : AppCompatActivity() {
                 Log.e(TAG, "TTS错误: $errorMessage")
                 runOnUiThread {
                     updateStatus("错误: $errorMessage")
+                }
+            }
+
+            override fun onLog(level: AppLogger.Level, logMessage: String) {
+                runOnUiThread {
+                    logView.addLog(level, logMessage)
                 }
             }
         }

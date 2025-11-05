@@ -1,15 +1,20 @@
 package com.qq.wx.offlinevoice.synthesizer.cache
 
 import android.content.Context
+import android.os.Environment
 import android.util.Log
+import android.widget.Toast
 import androidx.collection.LruCache
 import com.qq.wx.offlinevoice.synthesizer.DecodedPcm
+import com.qq.wx.offlinevoice.synthesizer.clearDirectoryFunctional
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.ObjectInputStream
 import java.io.ObjectOutputStream
 import java.security.MessageDigest
 
-class TtsCacheImpl(context: Context) : TtsCache {
+class TtsCacheImpl(private val context: Context) : TtsCache {
     // 内存缓存：快速访问
     private val memoryCache: LruCache<String, DecodedPcm> = LruCache(5 * 1024 * 1024) // 5MB
 
@@ -25,7 +30,12 @@ class TtsCacheImpl(context: Context) : TtsCache {
 
         // 2. 再从磁盘查找
         return try {
-            val file = File(diskCacheDir, key.toMd5())
+            val cacheDir = getAndEnsureDiskCacheDir()
+            if (cacheDir == null) {
+                Log.w("TtsCache", "磁盘缓存目录不可用，跳过写入磁盘缓存: $key")
+                return null
+            }
+            val file = File(cacheDir, key.toMd5())
             if (file.exists()) {
                 ObjectInputStream(file.inputStream()).use { stream ->
                     val pcm = stream.readObject() as DecodedPcm
@@ -47,7 +57,17 @@ class TtsCacheImpl(context: Context) : TtsCache {
         // 同时写入内存和磁盘
         memoryCache.put(key, pcm)
         try {
-            val file = File(diskCacheDir, key.toMd5())
+            // 2. 再从磁盘查找
+            // 获取并确保目录存在，如果失败则直接返回 null
+            val cacheDir = getAndEnsureDiskCacheDir()
+            if (cacheDir == null) {
+                Log.w("TtsCache", "磁盘缓存目录不可用，跳过写入磁盘缓存: $key")
+                return
+            }
+            val file = File(cacheDir, key.toMd5())
+            if (file.exists().not()) {
+                file.createNewFile()
+            }
             ObjectOutputStream(file.outputStream()).use { stream ->
                 stream.writeObject(pcm)
             }
@@ -57,8 +77,50 @@ class TtsCacheImpl(context: Context) : TtsCache {
         }
     }
 
+    override suspend fun clear() {
+        runCatching {
+            val memorySize = memoryCache.size()
+            val diskFiles = diskCacheDir.listFiles()?.size ?: 0
+            // 清空内存缓存
+            memoryCache.evictAll()
+            // 清空磁盘缓存
+            diskCacheDir.clearDirectoryFunctional()
+            Log.d("TtsCache", "缓存已清空, 内存项: $memorySize, 磁盘项: $diskFiles")
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "缓存已清空, 内存项: $memorySize, 磁盘项: $diskFiles", Toast.LENGTH_SHORT).show()
+            }
+        }.onFailure {
+            Log.e("TtsCache", "清空缓存失败", it)
+        }
+    }
+
     private fun String.toMd5(): String {
         return MessageDigest.getInstance("MD5").digest(this.toByteArray())
             .joinToString("") { "%02x".format(it) }
     }
+
+
+    /**
+     * 获取并确保磁盘缓存目录存在。
+     * 这是解决问题的核心函数。
+     * @return 如果目录可用则返回 File 对象，否则返回 null。
+     */
+    private fun getAndEnsureDiskCacheDir(): File? {
+        // 1. 检查外部存储是否已挂载并可读写
+        if (Environment.getExternalStorageState() != Environment.MEDIA_MOUNTED) {
+            Log.w("TtsCache", "外部存储不可用，磁盘缓存将禁用。")
+            return null
+        }
+
+        val cacheDir = diskCacheDir
+        // 2. 如果目录不存在，则尝试创建它（包括所有必要的父目录）
+        if (!cacheDir.exists()) {
+            if (!cacheDir.mkdirs()) {
+                Log.e("TtsCache", "无法创建磁盘缓存目录: ${cacheDir.absolutePath}")
+                return null // 如果创建失败，返回 null
+            }
+        }
+        return cacheDir
+    }
+
 }
