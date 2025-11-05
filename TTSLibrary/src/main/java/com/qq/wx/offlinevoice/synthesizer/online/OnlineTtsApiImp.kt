@@ -27,9 +27,10 @@ object WxReaderApi : OnlineTtsApi {
     // --- 优化 1: 创建一个共享的、配置合理的 OkHttpClient 实例 ---
     // 这对于性能至关重要，可以复用连接池和线程。
     private val client = OkHttpClient.Builder()
-        .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(15, TimeUnit.SECONDS)
-        .writeTimeout(10, TimeUnit.SECONDS)
+        .connectTimeout(5, TimeUnit.SECONDS)
+        .readTimeout(8, TimeUnit.SECONDS) // 单次读超时
+        .writeTimeout(5, TimeUnit.SECONDS)
+        .callTimeout(10, TimeUnit.SECONDS) // 关键：整个调用的总超时
         .build()
 
     // --- 优化 2: 使用扩展函数，将 OkHttp 的回调风格转换为协程的 suspend/resume 风格 ---
@@ -105,7 +106,7 @@ object WxReaderApi : OnlineTtsApi {
             put("style", 1)
             put("text_utf8", text)
             // 注意：硬编码的 token 可能会过期，实际应用中应该动态获取
-            put("token", "YOPfoHNLtyVmcIYB/hVUFlOkHasw0mJXlyMj7enSW70vA1/77x6nr1xGQNGg1CkY")
+            put("token", "84J7SVq9PWFNN9dqDSqq8o9GK4QcVV9Ppzw4y7P/tWTf9hnHsp0x2tkkdYAMP6L5")
             put("uid", 155027727)
             put("version", "9.3.8.10166907")
             put("busi_type", 1)
