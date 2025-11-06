@@ -22,6 +22,12 @@ interface TtsCallback {
      * @param totalSentences 句子总数
      */
     fun onSentenceStart(sentenceIndex: Int, sentence: String, totalSentences: Int, mode: SynthesisMode) {}
+
+
+    /**
+     *
+     */
+    fun onSentenceProgressChanged(sentenceIndex: Int, sentence: String, progress: Int, char: String) {}
     
     /**
      * 特定句子完成朗读时调用

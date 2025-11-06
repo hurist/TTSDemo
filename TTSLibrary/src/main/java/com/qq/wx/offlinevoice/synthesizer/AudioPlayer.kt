@@ -131,6 +131,42 @@ class AudioPlayer(
         private const val WRITE_CHUNK_SIZE = 2048
     }
 
+    // ---------- 新增：句内进度（samples 级）统计与查询 ----------
+    data class SentencePlaybackProgress(
+        val sentenceIndex: Int,
+        val playedSamples: Long,
+        val totalSamples: Long,
+        val fraction: Float // 0..1（若 total=0 则为 0）
+    )
+
+    @Volatile private var currentSentenceForProgress: Int = -1
+
+    // 自 AudioTrack 创建以来，累计“成功写入”的样本数（short 数），单声道即帧数
+    @Volatile private var globalWrittenSamples: Long = 0L
+
+    // 当前句“开始”时的全局已写入样本锚点（用于消除上一句缓冲尾巴的影响）
+    @Volatile private var sentenceStartWrittenSamples: Long = 0L
+
+    // 记录“已接纳用于播放”的 PCM 样本总数（按句聚合，单位：samples/shorts）
+    private val sentenceTotalSamples = mutableMapOf<Int, Long>()
+
+    /**
+     * 查询当前句的播放进度（samples 级）。
+     * - playedSamples：playbackHeadPosition - sentenceStartWrittenSamples（同一 AudioTrack 坐标系）
+     * - totalSamples：该句“已接纳用于播放”的样本总数（在线整句迅速收敛，离线逐步收敛）
+     * - fraction = played / max(total, 1)
+     */
+    fun getCurrentSentenceProgress(): SentencePlaybackProgress? {
+        val at = audioTrack ?: return null
+        val idx = currentSentenceForProgress
+        if (idx < 0) return null
+        val head = try { at.playbackHeadPosition.toLong() } catch (_: Exception) { return null }
+        val played = (head - sentenceStartWrittenSamples).coerceAtLeast(0)
+        val total = synchronized(sentenceTotalSamples) { sentenceTotalSamples[idx] ?: 0L }
+        val frac = if (total > 0) (played.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
+        return SentencePlaybackProgress(idx, played, total, frac)
+    }
+
     fun startIfNeeded(volume: Float = 1.0f) {
         currentVolume = volume.coerceIn(0f, 1f)
         if (playbackJob?.isActive == true) return
@@ -145,6 +181,12 @@ class AudioPlayer(
         pcmChannel.close(); controlChannel.close()
         pcmChannel = Channel(queueCapacity)
         controlChannel = Channel(Channel.CONFLATED)
+        // 重置进度统计
+        synchronized(sentenceTotalSamples) { sentenceTotalSamples.clear() }
+        currentSentenceForProgress = -1
+        globalWrittenSamples = 0L
+        sentenceStartWrittenSamples = 0L
+
         playbackJob = playbackCoroutine()
     }
 
@@ -208,6 +250,13 @@ class AudioPlayer(
                                     currentPlaybackSource = item.source
                                     AppLogger.i(TAG, ">>> 开始播放 [${item.source}] (采样率: ${item.sampleRate} Hz, 句子: ${item.sentenceIndex}) <<<")
                                 }
+
+                                // 累计该句的“已接纳样本数”（作为 totalSamples）
+                                synchronized(sentenceTotalSamples) {
+                                    val prev = sentenceTotalSamples[item.sentenceIndex] ?: 0L
+                                    sentenceTotalSamples[item.sentenceIndex] = prev + item.length.toLong()
+                                }
+
                                 audioTrack?.play()
                                 writePcmInChunks(item)
                             }
@@ -230,6 +279,15 @@ class AudioPlayer(
                                 if (item.gen == generation) {
                                     try { withContext(Dispatchers.Default) { item.onReached?.invoke() } }
                                     catch (t: Throwable) { AppLogger.w(TAG, "执行 Marker 回调时出错", t) }
+                                }
+
+                                // 句首 Marker：仅保证该句 totalSamples 初始化；进度锚点改为“第一块 PCM 写入”时设置
+                                if (item.type == MarkerType.SENTENCE_START) {
+                                    synchronized(sentenceTotalSamples) {
+                                        if (sentenceTotalSamples[item.sentenceIndex] == null) {
+                                            sentenceTotalSamples[item.sentenceIndex] = 0L
+                                        }
+                                    }
                                 }
 
                                 // 受保护句 END：等待缓冲排空 -> 结束保护期 -> 按句序吐回仅含 PCM 的句子
@@ -294,6 +352,11 @@ class AudioPlayer(
             protectionActive = false
             protectedSentenceIndex = -1
             deferredOnline.clear()
+            // 清理进度统计
+            synchronized(sentenceTotalSamples) { sentenceTotalSamples.clear() }
+            currentSentenceForProgress = -1
+            globalWrittenSamples = 0L
+            sentenceStartWrittenSamples = 0L
         }
     }
 
@@ -349,9 +412,14 @@ class AudioPlayer(
                 protectionActive = false
                 protectedSentenceIndex = -1
                 deferredOnline.clear()
+                // 清理进度统计
+                synchronized(sentenceTotalSamples) { sentenceTotalSamples.clear() }
+                currentSentenceForProgress = -1
+                globalWrittenSamples = 0L
+                sentenceStartWrittenSamples = 0L
             }
             ResetType.SOFT_QUEUE_ONLY -> {
-                AppLogger.d(TAG, "执行软重置：仅清空队列(保留指定句)，已进入保护期。")
+                AppLogger.d(TAG, "执行软重置：仅清队列(保留指定句)，已进入保护期。")
             }
         }
         control.ack?.complete(Unit)
@@ -362,11 +430,20 @@ class AudioPlayer(
      * - HARD：立即中断。
      * - SOFT_QUEUE_ONLY：若保留的是当前句，允许跨代次写完本块，避免断句；否则中断本块以尽快切换。
      * - 支持暂停：暂停期间不继续写入，但允许控制命令抢占，避免暂停期间 reset/软重置被卡住。
+     *
+     * 改进：句内进度的“起点锚”在该句第一块 PCM 开始写入时设置为当前 globalWrittenSamples，
+     * 避免上一句在缓冲区的残留播放被计入本句，解决离线模式进度偏差。
      */
     private suspend fun writePcmInChunks(item: QueueItem.Pcm) {
         val at = audioTrack ?: return
         var written = 0
         var allowContinueAcrossGenBump = false
+
+        // 句首：首次写入该句前，设置进度锚点
+        if (currentSentenceForProgress != item.sentenceIndex) {
+            currentSentenceForProgress = item.sentenceIndex
+            sentenceStartWrittenSamples = globalWrittenSamples
+        }
 
         while (written < item.length) {
             // 控制命令抢占
@@ -415,6 +492,8 @@ class AudioPlayer(
             val result = at.write(item.data, item.offset + written, toWrite)
             if (result > 0) {
                 written += result
+                // 累计全局“已写入样本数”（short 个数）
+                globalWrittenSamples += result.toLong()
             } else {
                 AppLogger.e(TAG, "AudioTrack 写入错误，代码: $result。中止当前音频块的写入。")
                 break
@@ -446,6 +525,9 @@ class AudioPlayer(
             isStopped = true
         } else {
             currentSampleRate = newSampleRate
+            // 新的 AudioTrack 建立后，重置“写入样本数”坐标系
+            globalWrittenSamples = 0L
+            sentenceStartWrittenSamples = 0L
             AppLogger.i(TAG, "新的 AudioTrack 已成功创建。")
         }
     }
@@ -599,6 +681,12 @@ class AudioPlayer(
         controlChannel.close(); pcmChannel.close()
         jobToJoin?.cancelAndJoin()
         playbackJob = null
+        // 清理进度统计
+        synchronized(sentenceTotalSamples) { sentenceTotalSamples.clear() }
+        currentSentenceForProgress = -1
+        globalWrittenSamples = 0L
+        sentenceStartWrittenSamples = 0L
+
         AppLogger.d(TAG, "AudioPlayer 已同步停止并释放资源。")
     }
 

@@ -58,7 +58,6 @@
                 android:id="@+id/buttonClear"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
-
                 android:layout_weight="1"
                 android:text="清缓存"
                 app:layout_constraintEnd_toEndOf="parent"
@@ -72,20 +71,27 @@
             android:id="@+id/textViewStatus"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="24dp"
+            android:layout_marginTop="4dp"
             android:gravity="center"
-            android:minHeight="120dp"
+            android:minHeight="80dp"
             android:text="状态: 空闲"
-            android:textSize="16sp"
+            android:textSize="12sp"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toBottomOf="@id/buttonPlay" />
+
+        <TextView
+            android:id="@+id/currentText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="10sp"
+            android:minHeight="50dp"/>
 
         <com.hurist.ttsdemo.LogRecyclerView
             android:id="@+id/logRecyclerView"
             android:layout_width="match_parent"
             android:layout_height="150dp"
-            android:layout_marginTop="14dp"
+            android:layout_marginTop="8dp"
             android:gravity="center"
             app:layout_constraintEnd_toEndOf="parent"
             app:layout_constraintStart_toStartOf="parent"

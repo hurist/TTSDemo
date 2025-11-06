@@ -1,7 +1,12 @@
 package com.hurist.ttsdemo
 
 import android.content.Context
+import android.graphics.Color
 import android.os.Bundle
+import android.text.SpannableString
+import android.text.Spanned
+import android.text.SpannedString
+import android.text.style.ForegroundColorSpan
 import android.util.Log
 import android.view.View
 import android.widget.AdapterView
@@ -30,6 +35,7 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 import androidx.core.content.edit
+import com.hurist.ttsdemo.databinding.ActivityMainBinding
 import com.qq.wx.offlinevoice.synthesizer.AppLogger
 
 /**
@@ -46,20 +52,8 @@ class MainActivity : AppCompatActivity() {
 
     private var tts: TtsSynthesizer? = null
 
-    // UI组件
-    private lateinit var editTextInput: EditText
-    private lateinit var tokenInput: EditText
-    private lateinit var seekBarSpeed: SeekBar
-    private lateinit var spinnerVoice: Spinner
-    private lateinit var buttonPlay: Button
-    private lateinit var buttonPause: Button
-    private lateinit var buttonStop: Button
-    private lateinit var textViewStatus: TextView
-    private lateinit var textViewSpeed: TextView
-    private lateinit var progressSlider: Slider
-    private lateinit var btnClear: Button
-    private lateinit var uidInput: EditText
-    private lateinit var logView: LogRecyclerView
+
+    private lateinit var binding: ActivityMainBinding
 
     private val sp by lazy {
         getSharedPreferences("prefs", Context.MODE_PRIVATE)
@@ -100,7 +94,8 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContentView(R.layout.activity_main)
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main)) { v, insets ->
             val systemBars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             v.setPadding(systemBars.left, systemBars.top, systemBars.right, systemBars.bottom)
@@ -136,28 +131,15 @@ class MainActivity : AppCompatActivity() {
      * 初始化UI组件
      */
     private fun initViews() {
-        editTextInput = findViewById(R.id.editTextInput)
-        seekBarSpeed = findViewById(R.id.seekBarSpeed)
-        spinnerVoice = findViewById(R.id.spinnerVoice)
-        buttonPlay = findViewById(R.id.buttonPlay)
-        buttonPause = findViewById(R.id.buttonPause)
-        buttonStop = findViewById(R.id.buttonStop)
-        textViewStatus = findViewById(R.id.textViewStatus)
-        textViewSpeed = findViewById(R.id.textViewSpeed)
-        progressSlider = findViewById(R.id.progress)
-        btnClear = findViewById(R.id.buttonClear)
-        tokenInput = findViewById(R.id.tokenInput)
-        uidInput = findViewById(R.id.uidInput)
-        logView = findViewById(R.id.logRecyclerView)
-        tokenInput.setText(token)
-        uidInput.setText(uid.toString())
+        binding.tokenInput.setText(token)
+        binding.uidInput.setText(uid.toString())
 
         // 设置默认文本
-        editTextInput.setText(text)
+        binding.editTextInput.setText(text)
 
         // 设置语速滑动条 (0.5x到3.0x，步进0.1，默认1.0x)
         // SeekBar范围: 0-25，映射到0.5-3.0
-        seekBarSpeed.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+        binding.seekBarSpeed.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
 
             }
@@ -165,7 +147,7 @@ class MainActivity : AppCompatActivity() {
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar) {
                 val speed = 0.5f + (seekBar.progress / 10f)  // 0.5 到 3.0
-                textViewSpeed.text = "语速: ${String.format("%.1f", speed)}x"
+                binding.textViewSpeed.text = "语速: ${String.format("%.1f", speed)}x"
 
                 // 动态修改语速
                 tts?.setSpeed(speed)
@@ -176,8 +158,8 @@ class MainActivity : AppCompatActivity() {
         val voiceAdapter =
             ArrayAdapter(this, android.R.layout.simple_spinner_item, speakers.map { it.modelName })
         voiceAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-        spinnerVoice.adapter = voiceAdapter
-        spinnerVoice.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+        binding.spinnerVoice.adapter = voiceAdapter
+        binding.spinnerVoice.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(
                 parent: AdapterView<*>?,
                 view: View?,
@@ -195,10 +177,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         // 设置按钮点击事件
-        buttonPlay.setOnClickListener {
-            val text = editTextInput.text.toString().trim()
-            val token = tokenInput.text.toString().trim()
-            val uidText = uidInput.text.toString().trim()
+        binding.buttonPlay.setOnClickListener {
+            val text = binding.editTextInput.text.toString().trim()
+            val token = binding.tokenInput.text.toString().trim()
+            val uidText = binding.uidInput.text.toString().trim()
 
             sp.edit { putString("token", token) }
             sp.edit { putInt("uid", uidText.toInt()) }
@@ -212,7 +194,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        buttonPause.setOnClickListener {
+        binding.buttonPause.setOnClickListener {
             if (tts?.isSpeaking() == true) {
                 tts?.pause()
             } else {
@@ -220,16 +202,16 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        buttonStop.setOnClickListener {
+        binding.buttonStop.setOnClickListener {
             tts?.stop()
         }
 
-        btnClear.setOnClickListener {
+        binding.buttonClear.setOnClickListener {
             tts?.clearCache()
-            logView.clearLogs()
+            binding.logRecyclerView.clearLogs()
         }
 
-        progressSlider.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
+        binding.progress.addOnSliderTouchListener(object : Slider.OnSliderTouchListener {
             override fun onStartTrackingTouch(slider: Slider) {
 
             }
@@ -248,7 +230,7 @@ class MainActivity : AppCompatActivity() {
     private fun initTts() {
         tts = TtsSynthesizer(this, currentVoice)
         tts!!.isPlaying.onEach {
-            buttonPause.text = if (it) "暂停" else "继续"
+            binding.buttonPause.text = if (it) "暂停" else "继续"
         }.launchIn(lifecycleScope)
 
         // 设置回调以监听TTS事件
@@ -279,7 +261,7 @@ class MainActivity : AppCompatActivity() {
             ) {
                 Log.d(TAG, "开始播放第 $sentenceIndex 句，共 $totalSentences 句")
                 runOnUiThread {
-                    progressSlider.apply {
+                    binding.progress.apply {
                         valueFrom = 1f
                         valueTo = totalSentences.toFloat()
                         value = sentenceIndex.toFloat() + 1
@@ -342,10 +324,46 @@ class MainActivity : AppCompatActivity() {
 
             override fun onLog(level: AppLogger.Level, logMessage: String) {
                 runOnUiThread {
-                    logView.addLog(level, logMessage)
+                    binding.logRecyclerView.addLog(level, logMessage)
+                }
+            }
+
+            override fun onSentenceProgressChanged(
+                sentenceIndex: Int,
+                sentence: String,
+                progress: Int,
+                char: String
+            ) {
+                Log.d(TAG, "句子进度：sentenceIndex：$sentenceIndex Progress: $progress, 句子：$sentence")
+                runOnUiThread {
+                    try {
+                        // 防止 progress 越界
+                        val currentIndex = progress.coerceIn(0, sentence.length - 1)
+
+                        // 创建 SpannableString 以支持局部样式
+                        val spannable = SpannableString(sentence)
+
+                        // 设置高亮范围（可根据需要调整：当前字 or 当前字之后几字）
+                        spannable.setSpan(
+                            ForegroundColorSpan(Color.RED),  // 当前播放字符变红
+                            currentIndex,
+                            (currentIndex + 1).coerceAtMost(sentence.length),
+                            Spanned.SPAN_EXCLUSIVE_EXCLUSIVE
+                        )
+
+                        // 其余文字恢复默认颜色（例如黑色，可根据主题调整）
+                        // 如果你的 TextView 已经有默认颜色，可以不额外处理。
+
+                        // 更新 UI（假设你的 TextView 叫 textView）
+                        binding.currentText.text = spannable
+
+                    } catch (e: Exception) {
+                        Log.e(TAG, "更新高亮文本失败", e)
+                    }
                 }
             }
         }
+
 
         tts?.setCallback(callback)
     }
@@ -354,18 +372,18 @@ class MainActivity : AppCompatActivity() {
      * 更新状态显示
      */
     private fun updateStatus(status: String) {
-        textViewStatus.text = "状态: $status"
+        binding.textViewStatus.text = "状态: $status"
     }
 
     /**
      * 启用/禁用控制按钮
      */
     private fun enableControls(enabled: Boolean) {
-        buttonPlay.isEnabled = enabled
-        buttonPause.isEnabled = enabled
-        buttonStop.isEnabled = enabled
-        seekBarSpeed.isEnabled = enabled
-        spinnerVoice.isEnabled = enabled
+        binding.buttonPlay.isEnabled = enabled
+        binding.buttonPause.isEnabled = enabled
+        binding.buttonStop.isEnabled = enabled
+        binding.seekBarSpeed.isEnabled = enabled
+        binding.spinnerVoice.isEnabled = enabled
     }
 
     override fun onDestroy() {

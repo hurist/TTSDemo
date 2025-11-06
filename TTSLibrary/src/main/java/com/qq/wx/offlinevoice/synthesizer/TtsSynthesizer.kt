@@ -26,6 +26,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.coroutineContext
 import kotlin.properties.Delegates
+import kotlin.math.floor
+import kotlin.math.min
 
 /**
  * TTS 合成器主类（Actor 模型）。
@@ -146,6 +148,9 @@ class TtsSynthesizer(
     @Volatile private var pendingSeekIndex: Int? = null
     @Volatile private var pendingSeekScheduled: Boolean = false
 
+    // ========= 新增：字符进度回调循环 =========
+    private var characterProgressJob: Job? = null
+
     companion object {
         private const val TAG = "TtsSynthesizer"
         private val instanceCount = AtomicInteger(0)
@@ -155,6 +160,8 @@ class TtsSynthesizer(
         private const val BASE_COOLDOWN_MS = 3000L
         private const val MAX_COOLDOWN_MS = 60000L
         private const val NETWORK_STABILIZE_MS = 600L
+        // 字符进度轮询周期（毫秒）
+        private const val CHAR_PROGRESS_INTERVAL_MS = 50L
 
         init {
             try {
@@ -238,6 +245,13 @@ class TtsSynthesizer(
                     playingSentenceIndex = command.index
                     currentCallback?.onSentenceStart(command.index, command.sentence, sentences.size, command.mode)
                     AppLogger.d(TAG, "修改句子索引为 ${command.index}: ${command.sentence}")
+                    // 句首立即给一次 0 位回调，改善可见联动
+                    currentCallback?.onSentenceProgressChanged(
+                        sentenceIndex = command.index,
+                        sentence = command.sentence,
+                        progress = 0,
+                        char = ""
+                    )
                 }
                 is Command.InternalSentenceEnd -> {
                     currentCallback?.onSentenceComplete(command.index, command.sentence)
@@ -985,7 +999,6 @@ class TtsSynthesizer(
         audioPlayer.enqueueEndOfStream(onDrained)
     }
 
-    // ============ 引擎准备、状态、冷却 ============
     private fun prepareForSynthesis(text: String, speed: Float, volume: Float): Int {
         synchronized(this) {
             if (currentSpeaker.offlineModelName != currentVoiceCode) {
@@ -1009,6 +1022,90 @@ class TtsSynthesizer(
             currentState = newState
             currentCallback?.onStateChanged(newState)
             _isPlaying.value = newState == TtsPlaybackState.PLAYING
+
+            // 启停字符进度轮询
+            when (newState) {
+                TtsPlaybackState.PLAYING -> startCharacterProgressLoop()
+                else -> stopCharacterProgressLoop()
+            }
+        }
+    }
+
+    private fun startCharacterProgressLoop() {
+        if (characterProgressJob?.isActive == true) return
+        characterProgressJob = appScope.launch(Dispatchers.Default) {
+            var lastSentence = -1
+            var lastCharIdx = -1
+            while (isActive && currentState == TtsPlaybackState.PLAYING) {
+                val progress = audioPlayer.getCurrentSentenceProgress()
+                if (progress != null) {
+                    val sIdx = progress.sentenceIndex
+                    val text = sentences.getOrNull(sIdx) ?: ""
+                    val charCount = text.length // 如需去空白可用 text.trim().length
+                    if (charCount > 0) {
+                        val frac = progress.fraction.coerceIn(0f, 1f)
+                        // 将比例映射为 [0, charCount-1] 的索引（加入标点/停顿加权以贴近主观听感）
+                        val idx = mapFractionToWeightedIndex(text, frac)
+                        if (sIdx != lastSentence || idx != lastCharIdx) {
+                            currentCallback?.onSentenceProgressChanged(
+                                sentenceIndex = sIdx,
+                                sentence = text,
+                                progress = idx,
+                                char = text.getOrNull(idx)?.toString() ?: ""
+                            )
+                            lastSentence = sIdx
+                            lastCharIdx = idx
+                        }
+                    } else {
+                        // 空句：固定回调 0
+                        if (sIdx != lastSentence || lastCharIdx != 0) {
+                            currentCallback?.onSentenceProgressChanged(
+                                sentenceIndex = sIdx,
+                                sentence = "",
+                                progress = 0,
+                                char = ""
+                            )
+                            lastSentence = sIdx
+                            lastCharIdx = 0
+                        }
+                    }
+                }
+                delay(CHAR_PROGRESS_INTERVAL_MS)
+            }
+        }
+    }
+
+    private fun stopCharacterProgressLoop() {
+        val job = characterProgressJob
+        characterProgressJob = null
+        job?.cancel()
+    }
+
+    /**
+     * 将播放比例映射到字符索引：对标点/停顿加权，缓解“线性比例”的系统性误差（离线更明显）。
+     * 可按需要微调各类字符的权重。
+     */
+    private fun mapFractionToWeightedIndex(text: String, fraction: Float): Int {
+        if (text.isEmpty()) return 0
+        val weights = FloatArray(text.length) { i -> charWeight(text[i]) }
+        val total = weights.sum().coerceAtLeast(1e-3f)
+        val target = total * fraction
+        var acc = 0f
+        for (i in weights.indices) {
+            acc += weights[i]
+            if (acc >= target) return i
+        }
+        return text.lastIndex
+    }
+
+    private fun charWeight(c: Char): Float {
+        return when {
+            c == ' ' || c == '\t' || c == '\u3000' -> 0.4f // 空白权重更小
+            c in charArrayOf('，','、','；','：',',',';') -> 1.5f // 小停顿
+            c in charArrayOf('。','！','？','!','?') -> 2.0f   // 大停顿
+            c == '—' || c == '-' -> 1.2f
+            c.isDigit() || c.isLetter() -> 1.1f
+            else -> 1.0f
         }
     }
 
