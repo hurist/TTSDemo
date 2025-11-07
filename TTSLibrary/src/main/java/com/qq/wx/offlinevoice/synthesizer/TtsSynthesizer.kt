@@ -158,9 +158,7 @@ class TtsSynthesizer(
 
     // 运行期缓存（内存命中后避免频繁 IO）
     private val scaleOverallByBucket = mutableMapOf<String, Float>()
-    private val scaleOnlineByBucket = mutableMapOf<String, Float>()
     private val countOverallByBucket = mutableMapOf<String, Int>()
-    private val countOnlineByBucket = mutableMapOf<String, Int>()
 
     // 句级观测缓存
     private val predictedSamplesPerSentence = mutableMapOf<Int, Long>()
@@ -1413,11 +1411,8 @@ class TtsSynthesizer(
                 c == '.' -> {
                     var j = i + 1; var dots = 1
                     while (j < trimmed.length && trimmed[j] == '.') { dots++; j++ }
-                    if (dots >= 3) {
-                        periodCnt += 1
-                        sumW += 0.8f
-                        i = j - 1
-                    } else sumW += 0.5f
+                    if (dots >= 3) { periodCnt += 1; sumW += 0.8f; i = j - 1 }
+                    else sumW += 0.5f
                 }
                 c.isDigit() -> sumW += 0.8f
                 c.isLetter() -> sumW += 0.6f
@@ -1441,10 +1436,8 @@ class TtsSynthesizer(
 
     private fun getCurrentBucketScale(preferOnline: Boolean): Float {
         val key = currentBucketKey()
-        val online = loadScaleOnline(key)
         val overall = loadScaleOverall(key) ?: DEFAULT_INIT_SCALE
-        val chosen = (if (preferOnline && online != null) online else overall).coerceIn(SCALE_MIN, SCALE_MAX)
-        return chosen
+        return overall.coerceIn(SCALE_MIN, SCALE_MAX)
     }
 
     private fun loadScaleOverall(bucket: String): Float? {
@@ -1461,20 +1454,6 @@ class TtsSynthesizer(
         ewmaPrefs.edit().putFloat("scale_overall_$bucket", value).apply()
     }
 
-    private fun loadScaleOnline(bucket: String): Float? {
-        scaleOnlineByBucket[bucket]?.let { return it }
-        val v = ewmaPrefs.getFloat("scale_online_$bucket", Float.NaN)
-        return if (v.isNaN()) null else {
-            val c = v.coerceIn(SCALE_MIN, SCALE_MAX)
-            scaleOnlineByBucket[bucket] = c
-            c
-        }
-    }
-    private fun saveScaleOnline(bucket: String, value: Float) {
-        scaleOnlineByBucket[bucket] = value
-        ewmaPrefs.edit().putFloat("scale_online_$bucket", value).apply()
-    }
-
     private fun loadCountOverall(bucket: String): Int? {
         val v = ewmaPrefs.getInt("scale_overall_cnt_$bucket", -1)
         return if (v < 0) null else v
@@ -1482,15 +1461,6 @@ class TtsSynthesizer(
     private fun saveCountOverall(bucket: String, value: Int) {
         countOverallByBucket[bucket] = value
         ewmaPrefs.edit().putInt("scale_overall_cnt_$bucket", value).apply()
-    }
-
-    private fun loadCountOnline(bucket: String): Int? {
-        val v = ewmaPrefs.getInt("scale_online_cnt_$bucket", -1)
-        return if (v < 0) null else v
-    }
-    private fun saveCountOnline(bucket: String, value: Int) {
-        countOnlineByBucket[bucket] = value
-        ewmaPrefs.edit().putInt("scale_online_cnt_$bucket", value).apply()
     }
 
     private fun maybeBoostPredictedInFlight(index: Int, sampleRate: Int) {
@@ -1519,33 +1489,20 @@ class TtsSynthesizer(
         if (predicted == null || actual == null || bucket == null || source == null) return
         if (predicted <= 0L || actual <= 0L) return
 
+        // 在线句直接跳过（在线不参与比例更新）
+        if (source == SynthesisMode.ONLINE) return
+
         val ratioRaw = (actual.toDouble() / predicted.toDouble()).toFloat()
         val ratio = ratioRaw.coerceIn(RATIO_MIN, RATIO_MAX)
         val overallBase = loadScaleOverall(bucket) ?: DEFAULT_INIT_SCALE
-        val onlineBase = loadScaleOnline(bucket)
         val overallCnt = (countOverallByBucket[bucket] ?: loadCountOverall(bucket) ?: 0)
-        val onlineCnt = (countOnlineByBucket[bucket] ?: loadCountOnline(bucket) ?: 0)
 
-        if (source == SynthesisMode.ONLINE) {
-            val alphaForOnline = if (onlineCnt < WARMUP_ONLINE_UPDATES) ALPHA_ONLINE_WARM else ALPHA_ONLINE
-            val base = onlineBase ?: overallBase
-            val newOnline = ((1f - alphaForOnline) * base + alphaForOnline * ratio).coerceIn(SCALE_MIN, SCALE_MAX)
-            scaleOnlineByBucket[bucket] = newOnline
-            saveScaleOnline(bucket, newOnline)
-            val newOnlineCnt2 = onlineCnt + 1
-            countOnlineByBucket[bucket] = newOnlineCnt2
-            saveCountOnline(bucket, newOnlineCnt2)
-            return
-        }
-
-        if (source == SynthesisMode.OFFLINE) {
-            val alphaOverall = ALPHA_OFFLINE
-            val newOverall = ((1f - alphaOverall) * overallBase + alphaOverall * ratio).coerceIn(SCALE_MIN, SCALE_MAX)
-            scaleOverallByBucket[bucket] = newOverall
-            saveScaleOverall(bucket, newOverall)
-            val newOverallCnt = overallCnt + 1
-            countOverallByBucket[bucket] = newOverallCnt
-            saveCountOverall(bucket, newOverallCnt)
-        }
+        val alphaOverall = ALPHA_OFFLINE
+        val newOverall = ((1f - alphaOverall) * overallBase + alphaOverall * ratio).coerceIn(SCALE_MIN, SCALE_MAX)
+        scaleOverallByBucket[bucket] = newOverall
+        saveScaleOverall(bucket, newOverall)
+        val newOverallCnt = overallCnt + 1
+        countOverallByBucket[bucket] = newOverallCnt
+        saveCountOverall(bucket, newOverallCnt)
     }
 }
