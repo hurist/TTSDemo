@@ -193,7 +193,6 @@ class TtsSynthesizer(
         private const val BASE_PERIOD_MS    = 600f   // 保持偏大句末停顿
         private const val DEFAULT_INIT_SCALE_BASE = 1.32f
 
-
         // 压缩幂指数（高速下缩短幅度更大）
         private const val POW_UNIT     = 0.45f  // 原 0.35：单字时长在高 speed 更快压缩
         private const val POW_INTERCEPT= 0.20f  // 保持
@@ -201,6 +200,15 @@ class TtsSynthesizer(
         private const val POW_COMMA    = 0.78f  // 原 0.60：逗号停顿在高 speed 明显缩短
         private const val POW_PERIOD   = 0.85f  // 原 0.65：句末停顿在高 speed 明显缩短
         private const val POW_SCALE    = 0.60f  // 原 0.40：冷启动整体比例在高 speed 更快收小
+
+        // 低速附加 BOOST 最大值
+        private const val LOW_BOOST_UNIT_MAX    = 0.25f
+        private const val LOW_BOOST_INTERCEPT_MAX=0.15f
+        private const val LOW_BOOST_MIN_MAX     = 0.20f
+        private const val LOW_BOOST_COMMA_MAX   = 0.40f
+        private const val LOW_BOOST_PERIOD_MAX  = 0.50f
+        private const val LOW_BOOST_SCALE_MAX   = 0.18f
+        private const val LOW_BOOST_POW         = 1.1f
 
         // 句中动态抬分母基准（再自适应）
         private const val MID_BOOST_RATIO_BASE = 1.05f
@@ -312,6 +320,7 @@ class TtsSynthesizer(
                     playingSentenceIndex = command.index
                     currentCallback?.onSentenceStart(command.index, command.sentence, sentences.size, command.mode)
                     AppLogger.d(TAG, "修改句子索引为 ${command.index}: ${command.sentence}")
+                    // 句首立即给一次 0 位回调，改善可见联动
                     currentCallback?.onSentenceProgressChanged(
                         sentenceIndex = command.index,
                         sentence = command.sentence,
@@ -1047,6 +1056,7 @@ class TtsSynthesizer(
                         AppLogger.i(TAG, "离线合成过程中进入/仍在保护期，句子 $index 延后（Deferred）。", important = true)
                         return@withLock SynthesisResult.Deferred
                     }
+
                     val status = nativeEngine?.synthesize(pcmArray, TtsConstants.PCM_BUFFER_SIZE, synthResult, 1) ?: -1
                     if (status == -1) {
                         val reason = "合成[离线]句子合成失败，状态码: -1"
@@ -1226,7 +1236,11 @@ class TtsSynthesizer(
      */
     private fun mapFractionToWeightedIndex(text: String, fraction: Float): Int {
         if (text.isEmpty()) return 0
+
+        // 基础权重（保留现有规则）
         val weights = FloatArray(text.length) { i -> charWeight(text[i]) }
+
+        // —— 新增：标点邻域权重扩散（避免到标点处一下子跳太多） —— //
         for (i in text.indices) {
             val c = text[i]
             val extra = when {
@@ -1235,6 +1249,7 @@ class TtsSynthesizer(
                 else -> 0f
             }
             if (extra > 0f) {
+                // 将额外权重按核 [-2..+2] 分配到标点及其邻居
                 for (k in -2..2) {
                     val j = i + k
                     if (j in text.indices) {
@@ -1243,6 +1258,7 @@ class TtsSynthesizer(
                 }
             }
         }
+
         val total = weights.sum().coerceAtLeast(1e-3f)
         val target = total * fraction.coerceIn(0f, 1f)
         var acc = 0f
@@ -1311,15 +1327,30 @@ class TtsSynthesizer(
         return value / s.pow(pow)
     }
 
+    private fun lowBoost(s: Float, max: Float): Float {
+        if (s >= 1f) return 0f
+        val t = (1f - s).pow(LOW_BOOST_POW)
+        return max * t
+    }
+
     private fun buildPredProfile(speed: Float): PredProfile {
         val s = speed.coerceIn(0.5f, 3.0f)
-        val unit    = speedCompress(BASE_UNIT_MS,      s, POW_UNIT)
-        val intercept = speedCompress(BASE_INTERCEPT_MS, s, POW_INTERCEPT)
-        val minMs   = speedCompress(BASE_MIN_MS,      s, POW_MIN)
-        val comma   = speedCompress(BASE_COMMA_MS,    s, POW_COMMA)
-        val period  = speedCompress(BASE_PERIOD_MS,   s, POW_PERIOD)
+        var unit    = speedCompress(BASE_UNIT_MS,      s, POW_UNIT)
+        var intercept = speedCompress(BASE_INTERCEPT_MS, s, POW_INTERCEPT)
+        var minMs   = speedCompress(BASE_MIN_MS,      s, POW_MIN)
+        var comma   = speedCompress(BASE_COMMA_MS,    s, POW_COMMA)
+        var period  = speedCompress(BASE_PERIOD_MS,   s, POW_PERIOD)
 
-        val rawScale = speedCompress(DEFAULT_INIT_SCALE_BASE, s, POW_SCALE)
+        var rawScale = speedCompress(DEFAULT_INIT_SCALE_BASE, s, POW_SCALE)
+
+        // 低速附加放大（仅 s<1.0 生效）
+        unit     *= (1f + lowBoost(s, LOW_BOOST_UNIT_MAX))
+        intercept*= (1f + lowBoost(s, LOW_BOOST_INTERCEPT_MAX))
+        minMs    *= (1f + lowBoost(s, LOW_BOOST_MIN_MAX))
+        comma    *= (1f + lowBoost(s, LOW_BOOST_COMMA_MAX))
+        period   *= (1f + lowBoost(s, LOW_BOOST_PERIOD_MAX))
+        rawScale *= (1f + lowBoost(s, LOW_BOOST_SCALE_MAX))
+
         // 高速时降低整体比例的下限，避免被冷启动比例拖慢
         val minScale = when {
             s >= 1.8f -> 1.05f
@@ -1359,6 +1390,7 @@ class TtsSynthesizer(
             when {
                 c == ' ' || c == '\t' || c == '\u3000' -> sumW += 0.2f
                 c in charArrayOf('，','、','；','：',',',';') -> { commaCnt++; sumW += 0.4f }
+                // 将“……”或“...”合并为一次句末停顿
                 c == '。' || c == '！' || c == '？' || c == '!' || c == '?' -> { periodCnt++; sumW += 0.6f }
                 c == '…' -> {
                     var j = i + 1
@@ -1378,7 +1410,7 @@ class TtsSynthesizer(
                 }
                 c.isDigit() -> sumW += 0.8f
                 c.isLetter() -> sumW += 0.6f
-                else -> sumW += 1.0f
+                else -> sumW += 1.0f // 汉字/CJK
             }
             i++
         }
