@@ -41,13 +41,7 @@ interface TtsCallback {
      * @param newState 新的播放状态
      */
     fun onStateChanged(newState: TtsPlaybackState) {}
-    
-    /**
-     * PCM数据可用于播放时调用
-     * @param pcmData 合成的PCM音频数据
-     * @param length 有效PCM数据的长度
-     */
-    fun onPcmDataAvailable(pcmData: ByteArray, length: Int) {}
+
     
     /**
      * 所有句子都已成功朗读时调用

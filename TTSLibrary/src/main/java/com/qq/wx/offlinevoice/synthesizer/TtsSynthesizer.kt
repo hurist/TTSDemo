@@ -58,7 +58,8 @@ import kotlin.math.pow
  */
 class TtsSynthesizer(
     private val context: Context,
-    private val speaker: Speaker
+    speaker: Speaker,
+    private var currentCallback: TtsCallback? = null
 ) {
 
     private sealed class SynthesisResult {
@@ -109,7 +110,6 @@ class TtsSynthesizer(
     private var currentSpeed: Float = 1.0f
     private var currentVolume: Float = 1.0f
     private var currentSpeaker = speaker
-    private var currentCallback: TtsCallback? = null
 
     private val strategyManager: SynthesisStrategyManager
     private val ttsRepository: TtsRepository
@@ -268,9 +268,17 @@ class TtsSynthesizer(
         appScope.launch { commandProcessor() }
         if (instanceCount.incrementAndGet() == 1) {
             nativeEngine = SynthesizerNative()
-            nativeEngine?.init(voiceDataPath.toByteArray())
+            runCatching {
+                nativeEngine?.init(voiceDataPath.toByteArray())
+            }.onFailure {
+                AppLogger.e(TAG, "TtsSynthesizer 初始化本地引擎失败: ${it.message}", it, important = true)
+                currentCallback?.onInitialized(false)
+            }.onSuccess {
+                AppLogger.i(TAG, "TtsSynthesizer 本地引擎初始化成功。", important = true)
+                currentCallback?.onInitialized(true)
+            }
         }
-        sendCommand(Command.SetCallback(null))
+        //sendCommand(Command.SetCallback(null))
     }
 
     // ============ 公共 API ============
@@ -315,7 +323,10 @@ class TtsSynthesizer(
                 is Command.Stop -> handleStop()
                 is Command.Release -> { handleRelease(); break }
                 is Command.SetStrategy -> strategyManager.setStrategy(command.strategy)
-                is Command.SetCallback -> { currentCallback = command.callback; currentCallback?.onInitialized(true) }
+                is Command.SetCallback -> {
+                    currentCallback = command.callback;
+                    currentCallback?.onInitialized(true)
+                }
                 is Command.InternalSentenceStart -> {
                     playingSentenceIndex = command.index
                     currentCallback?.onSentenceStart(command.index, command.sentence, sentences.size, command.mode)

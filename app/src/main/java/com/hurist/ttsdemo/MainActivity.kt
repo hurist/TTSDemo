@@ -228,10 +228,7 @@ class MainActivity : AppCompatActivity() {
      * 初始化TTS引擎
      */
     private fun initTts() {
-        tts = TtsSynthesizer(this, currentVoice)
-        tts!!.isPlaying.onEach {
-            binding.buttonPause.text = if (it) "暂停" else "继续"
-        }.launchIn(lifecycleScope)
+
 
         // 设置回调以监听TTS事件
         val callback = object : TtsCallback {
@@ -364,8 +361,11 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        tts = TtsSynthesizer(this, currentVoice, callback)
+        tts!!.isPlaying.onEach {
+            binding.buttonPause.text = if (it) "暂停" else "继续"
+        }.launchIn(lifecycleScope)
 
-        tts?.setCallback(callback)
     }
 
     /**
