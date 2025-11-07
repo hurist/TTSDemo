@@ -254,7 +254,9 @@ class MainActivity : AppCompatActivity() {
                 sentenceIndex: Int,
                 sentence: String,
                 totalSentences: Int,
-                mode: SynthesisMode
+                mode: SynthesisMode,
+                startPos: Int,
+                endPos: Int
             ) {
                 Log.d(TAG, "开始播放第 $sentenceIndex 句，共 $totalSentences 句")
                 runOnUiThread {
@@ -329,7 +331,9 @@ class MainActivity : AppCompatActivity() {
                 sentenceIndex: Int,
                 sentence: String,
                 progress: Int,
-                char: String
+                char: String,
+                startPos: Int,
+                endPos: Int
             ) {
                 Log.d(TAG, "句子进度：sentenceIndex：$sentenceIndex Progress: $progress, 句子：$sentence")
                 runOnUiThread {

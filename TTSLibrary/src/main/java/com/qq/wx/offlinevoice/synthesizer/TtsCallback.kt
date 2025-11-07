@@ -20,14 +20,23 @@ interface TtsCallback {
      * @param sentenceIndex 句子的索引（从0开始）
      * @param sentence 句子的文本
      * @param totalSentences 句子总数
+     * @param mode 朗读模式
+     * @param startPos 句子在整体文本中的起始位置
+     * @param endPos 句子在整体文本中的结束位置
      */
-    fun onSentenceStart(sentenceIndex: Int, sentence: String, totalSentences: Int, mode: SynthesisMode) {}
+    fun onSentenceStart(sentenceIndex: Int, sentence: String, totalSentences: Int, mode: SynthesisMode, startPos: Int, endPos: Int) {}
 
 
     /**
-     *
+     * 特定句子朗读进度变化时调用
+     * @param sentenceIndex 句子的索引（从0开始）
+     * @param sentence 句子的文本
+     * @param progress 朗读进度(第多少个字符已朗读)
+     * @param char 当前正在朗读的字符
+     * @param startPos 句子在整体文本中的起始位置
+     * @param endPos 句子在整体文本中的结束位置
      */
-    fun onSentenceProgressChanged(sentenceIndex: Int, sentence: String, progress: Int, char: String) {}
+    fun onSentenceProgressChanged(sentenceIndex: Int, sentence: String, progress: Int, char: String, startPos: Int, endPos: Int) {}
     
     /**
      * 特定句子完成朗读时调用
