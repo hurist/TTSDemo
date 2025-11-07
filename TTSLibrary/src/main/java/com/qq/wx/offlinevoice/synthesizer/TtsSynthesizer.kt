@@ -30,6 +30,7 @@ import kotlin.properties.Delegates
 import kotlin.math.min
 import kotlin.math.max
 import kotlin.math.pow
+import androidx.core.content.edit
 
 /**
  * TTS 合成器主类（Actor 模型）。
@@ -197,7 +198,7 @@ class TtsSynthesizer(
         private const val BASE_UNIT_MS      = 140f   // 原 PRED_BASE_MS_PER_UNIT 158 略降
         private const val BASE_INTERCEPT_MS = 145f   // 原 150
         private const val BASE_MIN_MS       = 370f   // 原 380
-        private const val BASE_COMMA_MS     = 520f   // 介于之前多组值之间
+        private const val BASE_COMMA_MS     = 500f   // 介于之前多组值之间
         private const val BASE_PERIOD_MS    = 600f   // 保持偏大句末停顿
         private const val DEFAULT_INIT_SCALE_BASE = 1.32f
 
@@ -213,9 +214,9 @@ class TtsSynthesizer(
         private const val LOW_BOOST_UNIT_MAX    = 0.25f
         private const val LOW_BOOST_INTERCEPT_MAX=0.15f
         private const val LOW_BOOST_MIN_MAX     = 0.20f
-        private const val LOW_BOOST_COMMA_MAX   = 0.40f
-        private const val LOW_BOOST_PERIOD_MAX  = 0.50f
-        private const val LOW_BOOST_SCALE_MAX   = 0.18f
+        private const val LOW_BOOST_COMMA_MAX   = 0.65f
+        private const val LOW_BOOST_PERIOD_MAX  = 0.80f
+        private const val LOW_BOOST_SCALE_MAX   = 0.22f
         private const val LOW_BOOST_POW         = 1.1f
 
         // 句中动态抬分母基准（再自适应）
@@ -642,6 +643,7 @@ class TtsSynthesizer(
             nativeEngine = null
             currentVoiceCode = null
         }
+        currentCallback = null
     }
 
     /**
@@ -1467,7 +1469,7 @@ class TtsSynthesizer(
     }
 
     private fun currentBucketKey(): String {
-        val spk = currentSpeaker.offlineModelName ?: "default"
+        val spk = currentSpeaker.offlineModelName
         val bucket = String.format("%.1f", currentSpeed.coerceIn(0.5f, 3.0f))
         return "$spk|$bucket"
     }
@@ -1489,7 +1491,7 @@ class TtsSynthesizer(
     }
     private fun saveScaleOverall(bucket: String, value: Float) {
         scaleOverallByBucket[bucket] = value
-        ewmaPrefs.edit().putFloat("scale_overall_$bucket", value).apply()
+        ewmaPrefs.edit { putFloat("scale_overall_$bucket", value)}
     }
 
     private fun loadCountOverall(bucket: String): Int? {
@@ -1498,7 +1500,7 @@ class TtsSynthesizer(
     }
     private fun saveCountOverall(bucket: String, value: Int) {
         countOverallByBucket[bucket] = value
-        ewmaPrefs.edit().putInt("scale_overall_cnt_$bucket", value).apply()
+        ewmaPrefs.edit { putInt("scale_overall_cnt_$bucket", value) }
     }
 
     private fun maybeBoostPredictedInFlight(index: Int, sampleRate: Int) {

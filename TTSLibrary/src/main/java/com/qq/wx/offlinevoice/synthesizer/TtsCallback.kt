@@ -28,7 +28,7 @@ interface TtsCallback {
 
 
     /**
-     * 特定句子朗读进度变化时调用
+     * 特定句子朗读进度变化时调用， Progress不太准确（特别是离线模式，预测整句的长度算出来的），仅供参考
      * @param sentenceIndex 句子的索引（从0开始）
      * @param sentence 句子的文本
      * @param progress 朗读进度(第多少个字符已朗读)
