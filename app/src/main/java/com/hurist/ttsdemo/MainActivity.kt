@@ -87,9 +87,9 @@ class MainActivity : AppCompatActivity() {
     )
     private var currentVoice: Speaker = speakers[0]
 
-    private var token = "yOqsngQ5CQ16j091qU8Rgvu/v5VskVLSnkjWORlDIrfQi+7DvEJoeiKv7MdsXY7o"
+    private var token = "BEiZG4YtWLmKUVuQPi27JZGX8ZFKf/le7sOWTwhTJGWg1S99D5LguFV+vbxNvvEH"
     private var uid = 925813821
-    private var gen = 1 // 每次要修改token, uid的硬编码时, 都要修改这个值
+    private var gen = 2 // 每次要修改token, uid的硬编码时, 都要修改这个值
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)

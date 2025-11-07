@@ -1,6 +1,7 @@
 package com.qq.wx.offlinevoice.synthesizer
 
 import android.content.Context
+import android.content.SharedPreferences
 import android.util.Log
 import android.widget.Toast
 import com.qq.wx.offlinevoice.synthesizer.cache.TtsCacheImpl
@@ -26,8 +27,8 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.coroutineContext
 import kotlin.properties.Delegates
-import kotlin.math.floor
 import kotlin.math.min
+import kotlin.math.max
 
 /**
  * TTS 合成器主类（Actor 模型）。
@@ -151,6 +152,26 @@ class TtsSynthesizer(
     // ========= 新增：字符进度回调循环 =========
     private var characterProgressJob: Job? = null
 
+    // ===== EWMA / 预测与持久化（SharedPreferences） =====
+    private val ewmaPrefs: SharedPreferences = context.getSharedPreferences("tts_ewma", Context.MODE_PRIVATE)
+
+    // 运行期缓存（内存命中后避免频繁 IO）
+    private val scaleOverallByBucket = mutableMapOf<String, Float>()
+    private val scaleOnlineByBucket = mutableMapOf<String, Float>()
+    private val countOverallByBucket = mutableMapOf<String, Int>()
+    private val countOnlineByBucket = mutableMapOf<String, Int>()
+
+    // 句级观测缓存
+    private val predictedSamplesPerSentence = mutableMapOf<Int, Long>()
+    private val actualSamplesPerSentence = mutableMapOf<Int, Long>()
+    private val bucketKeyPerSentence = mutableMapOf<Int, String>()
+    private val sourcePerSentence = mutableMapOf<Int, SynthesisMode>()
+    private val boostedPredictedSentences = mutableSetOf<Int>()
+
+    // —— 新增：仅用于“字符进度回调映射”的分数平滑状态（不影响播放器与日志） —— //
+    @Volatile private var mapSmoothLastSentence: Int = -1
+    @Volatile private var mapSmoothFrac: Float = 0f
+
     companion object {
         private const val TAG = "TtsSynthesizer"
         private val instanceCount = AtomicInteger(0)
@@ -162,6 +183,39 @@ class TtsSynthesizer(
         private const val NETWORK_STABILIZE_MS = 600L
         // 字符进度轮询周期（毫秒）
         private const val CHAR_PROGRESS_INTERVAL_MS = 50L
+
+        // 文本→时长基参（可按你的声线再微调）
+        private const val PRED_BASE_MS_PER_UNIT = 140f
+        private const val PRED_INTERCEPT_MS = 120f
+        private const val PRED_MIN_MS = 300f
+        private const val PRED_COMMA_PAUSE_MS = 260f
+        private const val PRED_PERIOD_PAUSE_MS = 400f
+
+        // EWMA 学习率
+        private const val ALPHA_OVERALL = 0.12f     // 常规整体
+        private const val ALPHA_OFFLINE = 0.08f     // 离线权重更小
+        private const val ALPHA_ONLINE_WARM = 0.5f  // 在线冷启动快速收敛
+        private const val ALPHA_ONLINE = 0.2f       // 在线常规权重
+        private const val WARMUP_ONLINE_UPDATES = 3
+
+        // 合法区间与默认
+        private const val SCALE_MIN = 0.6f
+        private const val SCALE_MAX = 1.8f
+        private const val RATIO_MIN = 0.5f
+        private const val RATIO_MAX = 2.0f
+        private const val DEFAULT_INIT_SCALE = 1.22f // 冷启动偏慢，防“偏快”
+
+        // 句中动态抬分母（渐进式）
+        private const val MID_BOOST_RATIO = 1.05f
+        private const val MID_BOOST_MULT = 1.23f
+        private const val MID_BOOST_STEP_MS = 350f
+        private const val MID_BOOST_MIN_MS = 400f
+
+        // —— 新增：仅用于字符进度映射的分数平滑与标点扩散参数（不影响分母/日志） —— //
+        private const val MAP_FRAC_ALPHA = 0.14f // fraction→字符索引 的轻量平滑
+        private val PUNC_KERNEL = floatArrayOf(0.15f, 0.25f, 0.20f, 0.25f, 0.15f) // 邻域分配核（-2..+2）
+        private const val PUNC_EXTRA_SMALL = 0.8f  // 小停顿（，、；：等）额外扩散总权重
+        private const val PUNC_EXTRA_BIG = 1.1f    // 大停顿（。！？等）额外扩散总权重
 
         init {
             try {
@@ -254,6 +308,9 @@ class TtsSynthesizer(
                     )
                 }
                 is Command.InternalSentenceEnd -> {
+                    // 句末：做 EWMA 参数更新（基于该句 predicted vs actual）
+                    onSentenceFinishedForEwma(command.index, command.sentence)
+
                     currentCallback?.onSentenceComplete(command.index, command.sentence)
                     if (upgradeWindowActive && command.index == upgradeProtectedIndex) {
                         AppLogger.i(TAG, "受保护句 #$upgradeProtectedIndex 已结束，关闭升级窗口。")
@@ -315,6 +372,13 @@ class TtsSynthesizer(
             currentCallback?.onError("文本中没有有效的句子")
             return
         }
+
+        // 清理句级观测缓存（EWMA 的比例字典保留，用于跨会话自适应）
+        predictedSamplesPerSentence.clear()
+        actualSamplesPerSentence.clear()
+        bucketKeyPerSentence.clear()
+        sourcePerSentence.clear()
+        boostedPredictedSentences.clear()
 
         playingSentenceIndex = 0
         synthesisSentenceIndex = 0
@@ -442,6 +506,13 @@ class TtsSynthesizer(
             AppLogger.d(TAG, "恢复前：播放器已同步重置（清空队列）。")
             synthesisSentenceIndex = restartIndex
 
+            // 清理句级观测缓存，避免不同参数污染
+            predictedSamplesPerSentence.clear()
+            actualSamplesPerSentence.clear()
+            bucketKeyPerSentence.clear()
+            sourcePerSentence.clear()
+            boostedPredictedSentences.clear()
+
             // 新会话下启动合成
             startSynthesis()
             AppLogger.d(TAG, "恢复前：新的合成任务已从索引 $synthesisSentenceIndex 处启动（将用新参数/seek 重新合成当前句）。")
@@ -483,6 +554,13 @@ class TtsSynthesizer(
         upgradeProtectedIndex = -1
         updateState(TtsPlaybackState.IDLE)
         AppLogger.d(TAG, "状态已置为 IDLE。")
+
+        // 清理句级观测缓存（EWMA 比例表保留）
+        predictedSamplesPerSentence.clear()
+        actualSamplesPerSentence.clear()
+        bucketKeyPerSentence.clear()
+        sourcePerSentence.clear()
+        boostedPredictedSentences.clear()
 
         appScope.launch {
             try {
@@ -530,6 +608,13 @@ class TtsSynthesizer(
         audioPlayer.resetBlocking()
         AppLogger.d(TAG, "播放器已同步重置。")
 
+        // 清理句级观测缓存（EWMA 比例表保留）
+        predictedSamplesPerSentence.clear()
+        actualSamplesPerSentence.clear()
+        bucketKeyPerSentence.clear()
+        sourcePerSentence.clear()
+        boostedPredictedSentences.clear()
+
         synthesisSentenceIndex = restartIndex
         startSynthesis()
         AppLogger.d(TAG, "新的合成任务已从索引 $restartIndex 处启动。")
@@ -549,9 +634,14 @@ class TtsSynthesizer(
         // 清空播放队列
         audioPlayer.resetBlocking()
         AppLogger.d(TAG, "暂停中 $reason：已取消旧循环并清空播放队列，等待恢复时从当前句重启生效。")
-    }
 
-    // ============ 新增：Seek 相关实现 ============
+        // 清理句级观测缓存
+        predictedSamplesPerSentence.clear()
+        actualSamplesPerSentence.clear()
+        bucketKeyPerSentence.clear()
+        sourcePerSentence.clear()
+        boostedPredictedSentences.clear()
+    }
 
     /**
      * 处理 seek 命令：
@@ -582,6 +672,14 @@ class TtsSynthesizer(
                 synthesisJob = null
                 audioPlayer.resetBlocking()
                 AppLogger.d(TAG, "handleSeekTo: 播放中，已取消旧任务并清空队列，准备从 #$target 重启。")
+
+                // 清缓存
+                predictedSamplesPerSentence.clear()
+                actualSamplesPerSentence.clear()
+                bucketKeyPerSentence.clear()
+                sourcePerSentence.clear()
+                boostedPredictedSentences.clear()
+
                 synthesisSentenceIndex = target
                 startSynthesis()
                 AppLogger.d(TAG, "handleSeekTo: 新的合成任务已从索引 $target 启动。")
@@ -714,7 +812,7 @@ class TtsSynthesizer(
     }
 
     /**
-     * 核心合成循环（依赖协程取消语义；边界统一调用 Guarded 入队/回调）。
+     * 核心合成循环（依赖协程取消语义；边界统一调用 Guarded 入队与回调）。
      */
     private fun CoroutineScope.launchSynthesisLoop() = launch {
         var synthesisFailed = false
@@ -776,6 +874,8 @@ class TtsSynthesizer(
 
                 finalPcm?.takeIf { it.isNotEmpty() && finalSampleRate != null }?.let { pcm ->
                     val lastIndex = (synthesisSentenceIndex - 1).coerceAtLeast(0)
+                    // 统计最后一块在线样本（用于 EWMA）
+                    actualSamplesPerSentence[lastIndex] = (actualSamplesPerSentence[lastIndex] ?: 0L) + pcm.size
                     enqueuePcmGuarded(
                         pcm = pcm,
                         sampleRate = finalSampleRate!!,
@@ -841,6 +941,14 @@ class TtsSynthesizer(
             val duration = System.currentTimeMillis() - start
             AppLogger.d(TAG, "在线合成句子 $index 成功，PCM 大小=${pcmData.size}, 采样率=$sampleRate, 耗时：$duration ms, 句子：$trimmed", important = true)
 
+            // 预测分母（优先使用 online 专用比例）
+            val predicted = predictTotalSamplesScaled(trimmed, sampleRate, currentSpeed, preferOnline = true)
+            predictedSamplesPerSentence[index] = predicted
+            bucketKeyPerSentence[index] = currentBucketKey()
+            sourcePerSentence[index] = SynthesisMode.ONLINE
+            boostedPredictedSentences.remove(index)
+            audioPlayer.setPredictedTotalSamples(index, predicted)
+
             enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.ONLINE) {
                 if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, sentence, SynthesisMode.ONLINE))
             }
@@ -857,6 +965,10 @@ class TtsSynthesizer(
 
                 val speedAdjustedPcm = onlineAudioProcessor?.process(pcmData) ?: pcmData
                 if (speedAdjustedPcm.isNotEmpty()) {
+                    // 统计在线入队样本（用于 EWMA）
+                    actualSamplesPerSentence[index] = (actualSamplesPerSentence[index] ?: 0L) + speedAdjustedPcm.size
+                    // 句中动态抬分母（渐进式）
+                    maybeBoostPredictedInFlight(index, sampleRate)
                     enqueuePcmGuarded(
                         pcm = speedAdjustedPcm,
                         sampleRate = sampleRate,
@@ -882,6 +994,8 @@ class TtsSynthesizer(
      * 离线合成。
      * - 保护期且目标句不是受保护句：返回 Deferred（不上产、不推进）；
      * - 边界统一用 Guarded 方法入队与回调闭包，集中会话守卫。
+     *
+     * 保持流式分块入队，但在句首先设置“预测总样本数”，稳定分母，避免进度回退。
      */
     private suspend fun performOfflineSynthesis(index: Int, sentence: String): SynthesisResult {
         if (!coroutineContext.isActive || !isSessionActive()) return SynthesisResult.Deferred
@@ -903,6 +1017,20 @@ class TtsSynthesizer(
                 }
 
                 AppLogger.d(TAG, "合成[离线]句子 $index: \"$trimmed\"", important = true)
+
+                // 句首设置预测总样本（离线固定采样率，优先用在线标定）
+                val predicted = predictTotalSamplesScaled(
+                    text = trimmed,
+                    sampleRate = TtsConstants.DEFAULT_SAMPLE_RATE,
+                    speed = currentSpeed,
+                    preferOnline = true
+                )
+                predictedSamplesPerSentence[index] = predicted
+                bucketKeyPerSentence[index] = currentBucketKey()
+                sourcePerSentence[index] = SynthesisMode.OFFLINE
+                boostedPredictedSentences.remove(index)
+                audioPlayer.setPredictedTotalSamples(index, predicted)
+
                 val prepare = prepareForSynthesis(trimmed, currentSpeed, currentVolume)
                 if (prepare != 0) {
                     val reason = "合成[离线]句子准备失败 (code=$prepare) 句子: $trimmed"
@@ -937,6 +1065,10 @@ class TtsSynthesizer(
                     val valid = num.coerceAtMost(pcmArray.size)
                     if (valid > 0) {
                         val chunk = pcmArray.copyOf(valid)
+                        // 统计离线入队样本（用于 EWMA）
+                        actualSamplesPerSentence[index] = (actualSamplesPerSentence[index] ?: 0L) + chunk.size
+                        // 句中动态抬分母（渐进式）
+                        maybeBoostPredictedInFlight(index, TtsConstants.DEFAULT_SAMPLE_RATE)
                         enqueuePcmGuarded(
                             pcm = chunk,
                             sampleRate = TtsConstants.DEFAULT_SAMPLE_RATE,
@@ -1043,8 +1175,18 @@ class TtsSynthesizer(
                     val text = sentences.getOrNull(sIdx) ?: ""
                     val charCount = text.length // 如需去空白可用 text.trim().length
                     if (charCount > 0) {
-                        val frac = progress.fraction.coerceIn(0f, 1f)
-                        // 将比例映射为 [0, charCount-1] 的索引（加入标点/停顿加权以贴近主观听感）
+                        // —— 新增：仅用于“字符进度映射”的分数轻量平滑（不改底层进度与日志） —— //
+                        val rawFrac = progress.fraction.coerceIn(0f, 1f)
+                        val frac = if (sIdx != mapSmoothLastSentence) {
+                            mapSmoothLastSentence = sIdx
+                            mapSmoothFrac = rawFrac
+                            rawFrac
+                        } else {
+                            mapSmoothFrac = mapSmoothFrac * (1f - MAP_FRAC_ALPHA) + rawFrac * MAP_FRAC_ALPHA
+                            mapSmoothFrac
+                        }
+
+                        // 将比例映射为 [0, charCount-1] 的索引（标点邻域扩散，缓解“到标点突然快一截”）
                         val idx = mapFractionToWeightedIndex(text, frac)
                         if (sIdx != lastSentence || idx != lastCharIdx) {
                             currentCallback?.onSentenceProgressChanged(
@@ -1087,9 +1229,31 @@ class TtsSynthesizer(
      */
     private fun mapFractionToWeightedIndex(text: String, fraction: Float): Int {
         if (text.isEmpty()) return 0
+
+        // 基础权重（保留现有规则）
         val weights = FloatArray(text.length) { i -> charWeight(text[i]) }
+
+        // —— 新增：标点邻域权重扩散（避免到标点处一下子跳太多） —— //
+        for (i in text.indices) {
+            val c = text[i]
+            val extra = when {
+                c in charArrayOf('，','、','；','：',',',';') -> PUNC_EXTRA_SMALL
+                c in charArrayOf('。','！','？','!','?','…') -> PUNC_EXTRA_BIG
+                else -> 0f
+            }
+            if (extra > 0f) {
+                // 将额外权重按核 [-2..+2] 分配到标点及其邻居
+                for (k in -2..2) {
+                    val j = i + k
+                    if (j in text.indices) {
+                        weights[j] += extra * PUNC_KERNEL[k + 2]
+                    }
+                }
+            }
+        }
+
         val total = weights.sum().coerceAtLeast(1e-3f)
-        val target = total * fraction
+        val target = total * fraction.coerceIn(0f, 1f)
         var acc = 0f
         for (i in weights.indices) {
             acc += weights[i]
@@ -1134,5 +1298,197 @@ class TtsSynthesizer(
             return
         }
         ttsRepository.clearCache()
+    }
+
+    // ================= 文本 → 预测总样本数（含 EWMA 比例） =================
+
+    private fun predictTotalSamplesScaled(text: String, sampleRate: Int, speed: Float, preferOnline: Boolean): Long {
+        val raw = predictTotalSamplesRaw(text, sampleRate, speed)
+        val scale = getCurrentBucketScale(preferOnline)
+        return (raw.toDouble() * scale.toDouble()).toLong().coerceAtLeast(1L)
+    }
+
+    /**
+     * 估算“整句总时长(ms)”，再换算成样本数（未包含 EWMA 比例）。
+     */
+    private fun predictTotalSamplesRaw(text: String, sampleRate: Int, speed: Float): Long {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return (sampleRate * PRED_MIN_MS / 1000f).toLong().coerceAtLeast(1L)
+
+        var sumW = 0f
+        var commaCnt = 0
+        var periodCnt = 0
+
+        var i = 0
+        while (i < trimmed.length) {
+            val c = trimmed[i]
+            when {
+                c == ' ' || c == '\t' || c == '\u3000' -> sumW += 0.2f
+                c in charArrayOf('，','、','；','：',',',';') -> { commaCnt++; sumW += 0.4f }
+                // 将“……”或“...”合并为一次句末停顿
+                c == '。' || c == '！' || c == '？' || c == '!' || c == '?' -> { periodCnt++; sumW += 0.6f }
+                c == '…' -> {
+                    var j = i + 1
+                    while (j < trimmed.length && trimmed[j] == '…') j++
+                    periodCnt += 1
+                    sumW += 0.8f
+                    i = j - 1
+                }
+                c == '.' -> {
+                    var j = i + 1
+                    var dots = 1
+                    while (j < trimmed.length && trimmed[j] == '.') { dots++; j++ }
+                    if (dots >= 3) {
+                        periodCnt += 1
+                        sumW += 0.8f
+                        i = j - 1
+                    } else {
+                        sumW += 0.5f
+                    }
+                }
+                c.isDigit() -> sumW += 0.8f
+                c.isLetter() -> sumW += 0.6f
+                else -> sumW += 1.0f // 汉字/CJK
+            }
+            i++
+        }
+
+        val spd = speed.coerceIn(0.5f, 3.0f)
+        val msPerUnit = PRED_BASE_MS_PER_UNIT / spd
+        val pauseScale = (0.6f + 0.4f / spd) // 停顿仅部分缩放，贴近离线体感
+        val commaPauseMs = PRED_COMMA_PAUSE_MS * pauseScale
+        val periodPauseMs = PRED_PERIOD_PAUSE_MS * pauseScale
+
+        var estMs = PRED_INTERCEPT_MS + msPerUnit * sumW +
+                commaCnt * commaPauseMs + periodCnt * periodPauseMs
+        if (estMs < PRED_MIN_MS) estMs = PRED_MIN_MS
+
+        val samples = (sampleRate * estMs / 1000f).toLong()
+        return samples.coerceAtLeast(1L)
+    }
+
+    // ================= Bucket（speaker×speed）比例管理（含持久化） =================
+    private fun currentBucketKey(): String {
+        val spk = currentSpeaker.offlineModelName ?: "default"
+        val bucket = String.format("%.1f", currentSpeed.coerceIn(0.5f, 3.0f))
+        return "$spk|$bucket"
+    }
+
+    private fun getCurrentBucketScale(preferOnline: Boolean): Float {
+        val key = currentBucketKey()
+        val online = loadScaleOnline(key) // 可能为 null
+        val overall = loadScaleOverall(key) ?: DEFAULT_INIT_SCALE
+        // 若 preferOnline 且有在线标定，则优先使用；否则用 overall
+        val chosen = (if (preferOnline && online != null) online else overall).coerceIn(SCALE_MIN, SCALE_MAX)
+        return chosen
+    }
+
+    private fun loadScaleOverall(bucket: String): Float? {
+        scaleOverallByBucket[bucket]?.let { return it }
+        val v = ewmaPrefs.getFloat("scale_overall_$bucket", Float.NaN)
+        return if (v.isNaN()) null else {
+            val c = v.coerceIn(SCALE_MIN, SCALE_MAX)
+            scaleOverallByBucket[bucket] = c
+            c
+        }
+    }
+    private fun saveScaleOverall(bucket: String, value: Float) {
+        scaleOverallByBucket[bucket] = value
+        ewmaPrefs.edit().putFloat("scale_overall_$bucket", value).apply()
+    }
+
+    private fun loadScaleOnline(bucket: String): Float? {
+        scaleOnlineByBucket[bucket]?.let { return it }
+        val v = ewmaPrefs.getFloat("scale_online_$bucket", Float.NaN)
+        return if (v.isNaN()) null else {
+            val c = v.coerceIn(SCALE_MIN, SCALE_MAX)
+            scaleOnlineByBucket[bucket] = c
+            c
+        }
+    }
+    private fun saveScaleOnline(bucket: String, value: Float) {
+        scaleOnlineByBucket[bucket] = value
+        ewmaPrefs.edit().putFloat("scale_online_$bucket", value).apply()
+    }
+
+    private fun loadCountOverall(bucket: String): Int? {
+        val v = ewmaPrefs.getInt("scale_overall_cnt_$bucket", -1)
+        return if (v < 0) null else v
+    }
+    private fun saveCountOverall(bucket: String, value: Int) {
+        countOverallByBucket[bucket] = value
+        ewmaPrefs.edit().putInt("scale_overall_cnt_$bucket", value).apply()
+    }
+
+    private fun loadCountOnline(bucket: String): Int? {
+        val v = ewmaPrefs.getInt("scale_online_cnt_$bucket", -1)
+        return if (v < 0) null else v
+    }
+    private fun saveCountOnline(bucket: String, value: Int) {
+        countOnlineByBucket[bucket] = value
+        ewmaPrefs.edit().putInt("scale_online_cnt_$bucket", value).apply()
+    }
+
+    // ================== 句中动态抬分母（渐进式） ==================
+    private fun maybeBoostPredictedInFlight(index: Int, sampleRate: Int) {
+        val actual = actualSamplesPerSentence[index] ?: return
+        val predicted = predictedSamplesPerSentence[index] ?: return
+
+        val minSamples = (sampleRate * (MID_BOOST_MIN_MS / 1000f)).toLong()
+        if (actual < minSamples) return
+
+        if (actual > (predicted * MID_BOOST_RATIO)) {
+            val target = (actual * MID_BOOST_MULT).toLong()
+            val step = (sampleRate * (MID_BOOST_STEP_MS / 1000f)).toLong().coerceAtLeast(1L)
+            val next = min(target, predicted + step)
+            if (next > predicted) {
+                predictedSamplesPerSentence[index] = next
+                audioPlayer.setPredictedTotalSamples(index, next)
+            }
+        }
+    }
+
+    // ================== 句末：EWMA 更新（在线优先、持久化） ==================
+    private fun onSentenceFinishedForEwma(index: Int, sentence: String) {
+        val predicted = predictedSamplesPerSentence.remove(index)
+        val actual = actualSamplesPerSentence.remove(index)
+        val bucket = bucketKeyPerSentence.remove(index)
+        val source = sourcePerSentence.remove(index)
+        boostedPredictedSentences.remove(index)
+
+        if (predicted == null || actual == null || bucket == null || source == null) return
+        if (predicted <= 0L || actual <= 0L) return
+
+        val ratioRaw = (actual.toDouble() / predicted.toDouble()).toFloat()
+        val ratio = ratioRaw.coerceIn(RATIO_MIN, RATIO_MAX)
+
+        // 读取现有比例与计数
+        val overallBase = loadScaleOverall(bucket) ?: DEFAULT_INIT_SCALE
+        val onlineBase = loadScaleOnline(bucket) // 可能为空
+        val overallCnt = (countOverallByBucket[bucket] ?: loadCountOverall(bucket) ?: 0)
+        val onlineCnt = (countOnlineByBucket[bucket] ?: loadCountOnline(bucket) ?: 0)
+
+        // 选择 α：在线更大，且前若干次用更大 α 快速收敛
+        val alphaForOnline = if (onlineCnt < WARMUP_ONLINE_UPDATES) ALPHA_ONLINE_WARM else ALPHA_ONLINE
+        val alphaOverall = if (source == SynthesisMode.ONLINE) ALPHA_OVERALL else ALPHA_OFFLINE
+
+        // 更新 overall
+        val newOverall = ((1f - alphaOverall) * overallBase + alphaOverall * ratio).coerceIn(SCALE_MIN, SCALE_MAX)
+        scaleOverallByBucket[bucket] = newOverall
+        saveScaleOverall(bucket, newOverall)
+        val newOverallCnt = overallCnt + 1
+        countOverallByBucket[bucket] = newOverallCnt
+        saveCountOverall(bucket, newOverallCnt)
+
+        // 若本句来自 ONLINE，再更新 online 专用比例
+        if (source == SynthesisMode.ONLINE) {
+            val base = onlineBase ?: overallBase // 没有 online 时，以 overall 为起点
+            val newOnline = ((1f - alphaForOnline) * base + alphaForOnline * ratio).coerceIn(SCALE_MIN, SCALE_MAX)
+            scaleOnlineByBucket[bucket] = newOnline
+            saveScaleOnline(bucket, newOnline)
+            val newOnlineCnt2 = onlineCnt + 1
+            countOnlineByBucket[bucket] = newOnlineCnt2
+            saveCountOnline(bucket, newOnlineCnt2)
+        }
     }
 }

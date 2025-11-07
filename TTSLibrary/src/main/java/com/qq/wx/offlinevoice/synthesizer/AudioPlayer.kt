@@ -18,6 +18,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 import kotlin.coroutines.coroutineContext
+import kotlin.math.max
+import kotlin.math.min
 
 /**
  * 流式 TTS 播放器，支持软/硬重置与在线/离线混播。
@@ -129,6 +131,16 @@ class AudioPlayer(
     companion object {
         private const val TAG = "AudioPlayer"
         private const val WRITE_CHUNK_SIZE = 2048
+        private const val FREEZE_MS = 150L
+        private const val FREEZE_CAP = 0.03f
+        private const val DENOM_FLOOR_MS = 100L
+        private const val END_LAG_OK_MS = 40L
+
+        // 分母动态平滑（上抬/回落）的步长与门限
+        private const val UP_GROWTH_MS = 120L      // 分母上抬的每次最大增长等效毫秒
+        private const val DOWN_SHRINK_MS = 120L    // 分母回落的每次最大减少等效毫秒
+        private const val SHRINK_TRIGGER = 0.90f   // accepted / dynamicPred < 该阈值，认为预测偏大
+        private const val SHRINK_START_FRAC = 0.55f// 超过该播放比例后才允许回落，避免前半段被放慢
     }
 
     // ---------- 新增：句内进度（samples 级）统计与查询 ----------
@@ -150,6 +162,17 @@ class AudioPlayer(
     // 记录“已接纳用于播放”的 PCM 样本总数（按句聚合，单位：samples/shorts）
     private val sentenceTotalSamples = mutableMapOf<Int, Long>()
 
+    // 预测分母（按句）
+    private val predictedTotalPerSentence = mutableMapOf<Int, Long>()
+
+    // 单句单调包络与句末放行
+    @Volatile private var lastSentenceForProgress: Int = -1
+    @Volatile private var lastFractionForSentence: Float = 0f
+    @Volatile private var endMarkerReachedForSentence: Boolean = false
+
+    // 新增：当前句“动态预测分母”（在 getCurrentSentenceProgress 内做平滑上抬/回落）
+    @Volatile private var dynamicPredictedForSentence: Long = 0L
+
     /**
      * 查询当前句的播放进度（samples 级）。
      * - playedSamples：playbackHeadPosition - sentenceStartWrittenSamples（同一 AudioTrack 坐标系）
@@ -162,9 +185,68 @@ class AudioPlayer(
         if (idx < 0) return null
         val head = try { at.playbackHeadPosition.toLong() } catch (_: Exception) { return null }
         val played = (head - sentenceStartWrittenSamples).coerceAtLeast(0)
-        val total = synchronized(sentenceTotalSamples) { sentenceTotalSamples[idx] ?: 0L }
-        val frac = if (total > 0) (played.toFloat() / total.toFloat()).coerceIn(0f, 1f) else 0f
-        return SentencePlaybackProgress(idx, played, total, frac)
+
+        val accepted = synchronized(sentenceTotalSamples) { sentenceTotalSamples[idx] ?: 0L }
+        val predictedRaw = synchronized(predictedTotalPerSentence) { predictedTotalPerSentence[idx] ?: 0L }
+
+        val sr = currentSampleRate.coerceAtLeast(1)
+        val denomFloor = (sr * DENOM_FLOOR_MS / 1000).toLong().coerceAtLeast(1L)
+        val upStep = (sr * UP_GROWTH_MS / 1000).toLong().coerceAtLeast(1L)
+        val downStep = (sr * DOWN_SHRINK_MS / 1000).toLong().coerceAtLeast(1L)
+
+        // 初始化动态预测分母
+        if (dynamicPredictedForSentence <= 0L) {
+            dynamicPredictedForSentence = predictedRaw
+        }
+
+        // 以当前动态分母估算一个临时分母与比例（用于判定是否允许回落）
+        val denomForFrac = max(max(dynamicPredictedForSentence, accepted), 1L)
+        val fracEst = (if (denomForFrac > 0) played.toFloat() / denomForFrac.toFloat() else 0f).coerceIn(0f, 1f)
+
+        // 平滑上抬：目标上界 = max(预测, 已接纳)
+        val targetUp = max(predictedRaw, accepted)
+        var dyn = dynamicPredictedForSentence
+        if (targetUp > dyn) {
+            dyn = min(targetUp, dyn + upStep)
+        } else {
+            // 允许缓慢回落：后半段且 accepted/dyn 明显偏小（预测偏大）
+            val ratio = if (dyn > 0L) accepted.toFloat() / dyn.toFloat() else 1f
+            if (!endMarkerReachedForSentence && fracEst >= SHRINK_START_FRAC && ratio < SHRINK_TRIGGER) {
+                dyn = max(accepted, dyn - downStep)
+            }
+        }
+        dynamicPredictedForSentence = dyn
+
+        // 最终原始分母（未加下限）：取“动态预测分母”和“已接纳”的较大值
+        var denom = max(dyn, accepted).coerceAtLeast(1L)
+
+        // 未到句末时给分母加下限，避免早到 1；到句末允许到 1
+        if (!endMarkerReachedForSentence) {
+            denom = max(denom, played + denomFloor)
+        } else {
+            denom = max(denom, played)
+        }
+
+        var frac = (played.toFloat() / denom.toFloat()).coerceIn(0f, 1f)
+
+        // 句首预热冻结
+        val playedMs = played.toFloat() * 1000f / sr.toFloat()
+        if (!endMarkerReachedForSentence && playedMs < FREEZE_MS) {
+            frac = min(frac, FREEZE_CAP)
+        }
+
+        // 单句单调包络
+        if (idx != lastSentenceForProgress) {
+            lastSentenceForProgress = idx
+            lastFractionForSentence = 0f
+        }
+        if (frac < lastFractionForSentence) {
+            frac = lastFractionForSentence
+        } else {
+            lastFractionForSentence = frac
+        }
+
+        return SentencePlaybackProgress(idx, played, denom, frac)
     }
 
     fun startIfNeeded(volume: Float = 1.0f) {
@@ -183,9 +265,14 @@ class AudioPlayer(
         controlChannel = Channel(Channel.CONFLATED)
         // 重置进度统计
         synchronized(sentenceTotalSamples) { sentenceTotalSamples.clear() }
+        synchronized(predictedTotalPerSentence) { predictedTotalPerSentence.clear() }
         currentSentenceForProgress = -1
         globalWrittenSamples = 0L
         sentenceStartWrittenSamples = 0L
+        lastSentenceForProgress = -1
+        lastFractionForSentence = 0f
+        endMarkerReachedForSentence = false
+        dynamicPredictedForSentence = 0L
 
         playbackJob = playbackCoroutine()
     }
@@ -331,6 +418,11 @@ class AudioPlayer(
                                         AppLogger.i(TAG, "保护期关闭。")
                                     }
                                 }
+
+                                // 记录当前句 END 到达（用于允许 fraction 最终达到 1）
+                                if (item.type == MarkerType.SENTENCE_END && item.sentenceIndex == currentSentenceForProgress) {
+                                    endMarkerReachedForSentence = true
+                                }
                             }
                             is QueueItem.EndOfStream -> {
                                 AppLogger.i(TAG, "收到流结束(EOS)，等待缓冲播放完毕后回调...")
@@ -354,9 +446,14 @@ class AudioPlayer(
             deferredOnline.clear()
             // 清理进度统计
             synchronized(sentenceTotalSamples) { sentenceTotalSamples.clear() }
+            synchronized(predictedTotalPerSentence) { predictedTotalPerSentence.clear() }
             currentSentenceForProgress = -1
             globalWrittenSamples = 0L
             sentenceStartWrittenSamples = 0L
+            lastSentenceForProgress = -1
+            lastFractionForSentence = 0f
+            endMarkerReachedForSentence = false
+            dynamicPredictedForSentence = 0L
         }
     }
 
@@ -414,9 +511,14 @@ class AudioPlayer(
                 deferredOnline.clear()
                 // 清理进度统计
                 synchronized(sentenceTotalSamples) { sentenceTotalSamples.clear() }
+                synchronized(predictedTotalPerSentence) { predictedTotalPerSentence.clear() }
                 currentSentenceForProgress = -1
                 globalWrittenSamples = 0L
                 sentenceStartWrittenSamples = 0L
+                lastSentenceForProgress = -1
+                lastFractionForSentence = 0f
+                endMarkerReachedForSentence = false
+                dynamicPredictedForSentence = 0L
             }
             ResetType.SOFT_QUEUE_ONLY -> {
                 AppLogger.d(TAG, "执行软重置：仅清队列(保留指定句)，已进入保护期。")
@@ -439,10 +541,16 @@ class AudioPlayer(
         var written = 0
         var allowContinueAcrossGenBump = false
 
-        // 句首：首次写入该句前，设置进度锚点
+        // 句首：首次写入该句前，设置进度锚点，并重置状态
         if (currentSentenceForProgress != item.sentenceIndex) {
             currentSentenceForProgress = item.sentenceIndex
             sentenceStartWrittenSamples = globalWrittenSamples
+            lastSentenceForProgress = item.sentenceIndex
+            lastFractionForSentence = 0f
+            endMarkerReachedForSentence = false
+            // 初始化动态分母
+            val predictedRaw = synchronized(predictedTotalPerSentence) { predictedTotalPerSentence[item.sentenceIndex] ?: 0L }
+            dynamicPredictedForSentence = predictedRaw
         }
 
         while (written < item.length) {
@@ -528,6 +636,10 @@ class AudioPlayer(
             // 新的 AudioTrack 建立后，重置“写入样本数”坐标系
             globalWrittenSamples = 0L
             sentenceStartWrittenSamples = 0L
+            lastSentenceForProgress = -1
+            lastFractionForSentence = 0f
+            endMarkerReachedForSentence = false
+            dynamicPredictedForSentence = 0L
             AppLogger.i(TAG, "新的 AudioTrack 已成功创建。")
         }
     }
@@ -651,7 +763,7 @@ class AudioPlayer(
     }
 
     fun setVolume(volume: Float) {
-        val v = volume.coerceIn(0f, 1f); currentVolume = v
+        val v = volume.coerceIn(0f, 1.0f); currentVolume = v
         audioTrack?.setStereoVolume(v, v)
     }
 
@@ -683,9 +795,14 @@ class AudioPlayer(
         playbackJob = null
         // 清理进度统计
         synchronized(sentenceTotalSamples) { sentenceTotalSamples.clear() }
+        synchronized(predictedTotalPerSentence) { predictedTotalPerSentence.clear() }
         currentSentenceForProgress = -1
         globalWrittenSamples = 0L
         sentenceStartWrittenSamples = 0L
+        lastSentenceForProgress = -1
+        lastFractionForSentence = 0f
+        endMarkerReachedForSentence = false
+        dynamicPredictedForSentence = 0L
 
         AppLogger.d(TAG, "AudioPlayer 已同步停止并释放资源。")
     }
@@ -709,4 +826,12 @@ class AudioPlayer(
 
     fun isInProtection(): Boolean = protectionActive
     fun getProtectedSentenceIndex(): Int = protectedSentenceIndex
+
+    // 供上层设置预测总样本
+    fun setPredictedTotalSamples(sentenceIndex: Int, predictedSamples: Long) {
+        if (predictedSamples <= 0) return
+        synchronized(predictedTotalPerSentence) {
+            predictedTotalPerSentence[sentenceIndex] = predictedSamples
+        }
+    }
 }
