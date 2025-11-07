@@ -29,6 +29,7 @@ import kotlin.coroutines.coroutineContext
 import kotlin.properties.Delegates
 import kotlin.math.min
 import kotlin.math.max
+import kotlin.math.pow
 
 /**
  * TTS 合成器主类（Actor 模型）。
@@ -184,18 +185,37 @@ class TtsSynthesizer(
         // 字符进度轮询周期（毫秒）
         private const val CHAR_PROGRESS_INTERVAL_MS = 50L
 
-        // 文本→时长基参（可按你的声线再微调）
-        private const val PRED_BASE_MS_PER_UNIT = 140f
-        private const val PRED_INTERCEPT_MS = 120f
-        private const val PRED_MIN_MS = 300f
-        private const val PRED_COMMA_PAUSE_MS = 260f
-        private const val PRED_PERIOD_PAUSE_MS = 400f
+        // ========= 自适应预测基准常量（速度=1.0 的基线） =========
+        private const val BASE_UNIT_MS      = 140f   // 原 PRED_BASE_MS_PER_UNIT 158 略降
+        private const val BASE_INTERCEPT_MS = 145f   // 原 150
+        private const val BASE_MIN_MS       = 370f   // 原 380
+        private const val BASE_COMMA_MS     = 520f   // 介于之前多组值之间
+        private const val BASE_PERIOD_MS    = 600f   // 保持偏大句末停顿
+        private const val DEFAULT_INIT_SCALE_BASE = 1.32f
 
-        // EWMA 学习率
-        private const val ALPHA_OVERALL = 0.12f     // 常规整体
-        private const val ALPHA_OFFLINE = 0.08f     // 离线权重更小
-        private const val ALPHA_ONLINE_WARM = 0.5f  // 在线冷启动快速收敛
-        private const val ALPHA_ONLINE = 0.2f       // 在线常规权重
+
+        // 压缩幂指数（高速下缩短幅度更大）
+        private const val POW_UNIT     = 0.45f  // 原 0.35：单字时长在高 speed 更快压缩
+        private const val POW_INTERCEPT= 0.20f  // 保持
+        private const val POW_MIN      = 0.40f  // 原 0.30：最小时长也随 speed 更明显缩短
+        private const val POW_COMMA    = 0.78f  // 原 0.60：逗号停顿在高 speed 明显缩短
+        private const val POW_PERIOD   = 0.85f  // 原 0.65：句末停顿在高 speed 明显缩短
+        private const val POW_SCALE    = 0.60f  // 原 0.40：冷启动整体比例在高 speed 更快收小
+
+        // 句中动态抬分母基准（再自适应）
+        private const val MID_BOOST_RATIO_BASE = 1.05f
+        private const val MID_BOOST_MULT_BASE  = 1.17f
+        private const val MID_BOOST_STEP_MS_BASE = 250f
+        private const val MID_BOOST_MIN_MS_BASE  = 500f
+
+        // 保留旧常量名用于兼容其它代码引用（值取基准）
+        private const val DEFAULT_INIT_SCALE    = DEFAULT_INIT_SCALE_BASE
+
+        // EWMA 学习率（保持原逻辑）
+        private const val ALPHA_OVERALL = 0.10f
+        private const val ALPHA_OFFLINE = 0.06f
+        private const val ALPHA_ONLINE_WARM = 0.5f
+        private const val ALPHA_ONLINE = 0.2f
         private const val WARMUP_ONLINE_UPDATES = 3
 
         // 合法区间与默认
@@ -203,19 +223,12 @@ class TtsSynthesizer(
         private const val SCALE_MAX = 1.8f
         private const val RATIO_MIN = 0.5f
         private const val RATIO_MAX = 2.0f
-        private const val DEFAULT_INIT_SCALE = 1.22f // 冷启动偏慢，防“偏快”
-
-        // 句中动态抬分母（渐进式）
-        private const val MID_BOOST_RATIO = 1.05f
-        private const val MID_BOOST_MULT = 1.23f
-        private const val MID_BOOST_STEP_MS = 350f
-        private const val MID_BOOST_MIN_MS = 400f
 
         // —— 新增：仅用于字符进度映射的分数平滑与标点扩散参数（不影响分母/日志） —— //
-        private const val MAP_FRAC_ALPHA = 0.14f // fraction→字符索引 的轻量平滑
-        private val PUNC_KERNEL = floatArrayOf(0.15f, 0.25f, 0.20f, 0.25f, 0.15f) // 邻域分配核（-2..+2）
-        private const val PUNC_EXTRA_SMALL = 0.8f  // 小停顿（，、；：等）额外扩散总权重
-        private const val PUNC_EXTRA_BIG = 1.1f    // 大停顿（。！？等）额外扩散总权重
+        private const val MAP_FRAC_ALPHA = 0.12f
+        private val PUNC_KERNEL = floatArrayOf(0.18f, 0.22f, 0.20f, 0.22f, 0.18f)
+        private const val PUNC_EXTRA_SMALL = 0.70f
+        private const val PUNC_EXTRA_BIG = 1.02f
 
         init {
             try {
@@ -299,7 +312,6 @@ class TtsSynthesizer(
                     playingSentenceIndex = command.index
                     currentCallback?.onSentenceStart(command.index, command.sentence, sentences.size, command.mode)
                     AppLogger.d(TAG, "修改句子索引为 ${command.index}: ${command.sentence}")
-                    // 句首立即给一次 0 位回调，改善可见联动
                     currentCallback?.onSentenceProgressChanged(
                         sentenceIndex = command.index,
                         sentence = command.sentence,
@@ -308,9 +320,7 @@ class TtsSynthesizer(
                     )
                 }
                 is Command.InternalSentenceEnd -> {
-                    // 句末：做 EWMA 参数更新（基于该句 predicted vs actual）
                     onSentenceFinishedForEwma(command.index, command.sentence)
-
                     currentCallback?.onSentenceComplete(command.index, command.sentence)
                     if (upgradeWindowActive && command.index == upgradeProtectedIndex) {
                         AppLogger.i(TAG, "受保护句 #$upgradeProtectedIndex 已结束，关闭升级窗口。")
@@ -328,8 +338,6 @@ class TtsSynthesizer(
                     handleStop()
                     currentCallback?.onError(command.message)
                 }
-
-                // 新增：按句 seek 的处理
                 is Command.SeekTo -> handleSeekTo(command.index)
             }
         }
@@ -941,14 +949,7 @@ class TtsSynthesizer(
             val duration = System.currentTimeMillis() - start
             AppLogger.d(TAG, "在线合成句子 $index 成功，PCM 大小=${pcmData.size}, 采样率=$sampleRate, 耗时：$duration ms, 句子：$trimmed", important = true)
 
-            // 预测分母（优先使用 online 专用比例）
-            val predicted = predictTotalSamplesScaled(trimmed, sampleRate, currentSpeed, preferOnline = true)
-            predictedSamplesPerSentence[index] = predicted
-            bucketKeyPerSentence[index] = currentBucketKey()
-            sourcePerSentence[index] = SynthesisMode.ONLINE
-            boostedPredictedSentences.remove(index)
-            audioPlayer.setPredictedTotalSamples(index, predicted)
-
+            // 在线：不设置预测分母，不加入 predictedSamplesPerSentence（方案A）
             enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.ONLINE) {
                 if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, sentence, SynthesisMode.ONLINE))
             }
@@ -965,10 +966,7 @@ class TtsSynthesizer(
 
                 val speedAdjustedPcm = onlineAudioProcessor?.process(pcmData) ?: pcmData
                 if (speedAdjustedPcm.isNotEmpty()) {
-                    // 统计在线入队样本（用于 EWMA）
                     actualSamplesPerSentence[index] = (actualSamplesPerSentence[index] ?: 0L) + speedAdjustedPcm.size
-                    // 句中动态抬分母（渐进式）
-                    maybeBoostPredictedInFlight(index, sampleRate)
                     enqueuePcmGuarded(
                         pcm = speedAdjustedPcm,
                         sampleRate = sampleRate,
@@ -1018,12 +1016,12 @@ class TtsSynthesizer(
 
                 AppLogger.d(TAG, "合成[离线]句子 $index: \"$trimmed\"", important = true)
 
-                // 句首设置预测总样本（离线固定采样率，优先用在线标定）
+                // 自适应预测（离线）
                 val predicted = predictTotalSamplesScaled(
                     text = trimmed,
                     sampleRate = TtsConstants.DEFAULT_SAMPLE_RATE,
                     speed = currentSpeed,
-                    preferOnline = true
+                    preferOnline = false
                 )
                 predictedSamplesPerSentence[index] = predicted
                 bucketKeyPerSentence[index] = currentBucketKey()
@@ -1049,7 +1047,6 @@ class TtsSynthesizer(
                         AppLogger.i(TAG, "离线合成过程中进入/仍在保护期，句子 $index 延后（Deferred）。", important = true)
                         return@withLock SynthesisResult.Deferred
                     }
-
                     val status = nativeEngine?.synthesize(pcmArray, TtsConstants.PCM_BUFFER_SIZE, synthResult, 1) ?: -1
                     if (status == -1) {
                         val reason = "合成[离线]句子合成失败，状态码: -1"
@@ -1229,11 +1226,7 @@ class TtsSynthesizer(
      */
     private fun mapFractionToWeightedIndex(text: String, fraction: Float): Int {
         if (text.isEmpty()) return 0
-
-        // 基础权重（保留现有规则）
         val weights = FloatArray(text.length) { i -> charWeight(text[i]) }
-
-        // —— 新增：标点邻域权重扩散（避免到标点处一下子跳太多） —— //
         for (i in text.indices) {
             val c = text[i]
             val extra = when {
@@ -1242,7 +1235,6 @@ class TtsSynthesizer(
                 else -> 0f
             }
             if (extra > 0f) {
-                // 将额外权重按核 [-2..+2] 分配到标点及其邻居
                 for (k in -2..2) {
                     val j = i + k
                     if (j in text.indices) {
@@ -1251,7 +1243,6 @@ class TtsSynthesizer(
                 }
             }
         }
-
         val total = weights.sum().coerceAtLeast(1e-3f)
         val target = total * fraction.coerceIn(0f, 1f)
         var acc = 0f
@@ -1264,9 +1255,9 @@ class TtsSynthesizer(
 
     private fun charWeight(c: Char): Float {
         return when {
-            c == ' ' || c == '\t' || c == '\u3000' -> 0.4f // 空白权重更小
-            c in charArrayOf('，','、','；','：',',',';') -> 1.5f // 小停顿
-            c in charArrayOf('。','！','？','!','?') -> 2.0f   // 大停顿
+            c == ' ' || c == '\t' || c == '\u3000' -> 0.4f
+            c in charArrayOf('，','、','；','：',',',';') -> 1.5f
+            c in charArrayOf('。','！','？','!','?') -> 2.0f
             c == '—' || c == '-' -> 1.2f
             c.isDigit() || c.isLetter() -> 1.1f
             else -> 1.0f
@@ -1275,7 +1266,7 @@ class TtsSynthesizer(
 
     private fun activateOnlineCooldown() {
         onlineFailureCount++
-        val backoffFactor = (1 shl (onlineFailureCount - 1).coerceAtMost(5)).toLong() // 1,2,4,8,16,32
+        val backoffFactor = (1 shl (onlineFailureCount - 1).coerceAtMost(5)).toLong()
         val cooldownDuration = (BASE_COOLDOWN_MS * backoffFactor).coerceAtMost(MAX_COOLDOWN_MS)
         onlineCooldownUntilTimestamp = System.currentTimeMillis() + cooldownDuration
         AppLogger.i(TAG, "在线合成失败次数: $onlineFailureCount。激活冷却期 ${cooldownDuration}ms。")
@@ -1302,30 +1293,72 @@ class TtsSynthesizer(
 
     // ================= 文本 → 预测总样本数（含 EWMA 比例） =================
 
-    private fun predictTotalSamplesScaled(text: String, sampleRate: Int, speed: Float, preferOnline: Boolean): Long {
-        val raw = predictTotalSamplesRaw(text, sampleRate, speed)
-        val scale = getCurrentBucketScale(preferOnline)
-        return (raw.toDouble() * scale.toDouble()).toLong().coerceAtLeast(1L)
+    private data class PredProfile(
+        val unitMs: Float,
+        val interceptMs: Float,
+        val minMs: Float,
+        val commaMs: Float,
+        val periodMs: Float,
+        val scaleFactor: Float,
+        val midBoostRatio: Float,
+        val midBoostMult: Float,
+        val midBoostStepMs: Float,
+        val midBoostMinMs: Float
+    )
+
+    private fun speedCompress(value: Float, speed: Float, pow: Float): Float {
+        val s = speed.coerceIn(0.5f, 3.0f)
+        return value / s.pow(pow)
     }
 
-    /**
-     * 估算“整句总时长(ms)”，再换算成样本数（未包含 EWMA 比例）。
-     */
+    private fun buildPredProfile(speed: Float): PredProfile {
+        val s = speed.coerceIn(0.5f, 3.0f)
+        val unit    = speedCompress(BASE_UNIT_MS,      s, POW_UNIT)
+        val intercept = speedCompress(BASE_INTERCEPT_MS, s, POW_INTERCEPT)
+        val minMs   = speedCompress(BASE_MIN_MS,      s, POW_MIN)
+        val comma   = speedCompress(BASE_COMMA_MS,    s, POW_COMMA)
+        val period  = speedCompress(BASE_PERIOD_MS,   s, POW_PERIOD)
+
+        val rawScale = speedCompress(DEFAULT_INIT_SCALE_BASE, s, POW_SCALE)
+        // 高速时降低整体比例的下限，避免被冷启动比例拖慢
+        val minScale = when {
+            s >= 1.8f -> 1.05f
+            s >= 1.5f -> 1.08f
+            s >= 1.3f -> 1.10f
+            else      -> 1.15f
+        }
+        val scaleClamped = rawScale.coerceIn(minScale, 1.40f)
+
+        val midRatio = (MID_BOOST_RATIO_BASE + (s - 1f) * 0.01f).coerceIn(1.03f, 1.08f)
+        val midMult  = (MID_BOOST_MULT_BASE - (s - 1f) * 0.02f).coerceIn(1.12f, MID_BOOST_MULT_BASE)
+        val midStep  = (MID_BOOST_STEP_MS_BASE - (s - 1f) * 30f).coerceIn(180f, MID_BOOST_STEP_MS_BASE)
+        val midMin   = (MID_BOOST_MIN_MS_BASE - (s - 1f) * 40f).coerceIn(380f, MID_BOOST_MIN_MS_BASE)
+
+        return PredProfile(unit, intercept, minMs, comma, period, scaleClamped, midRatio, midMult, midStep, midMin)
+    }
+
+    private fun predictTotalSamplesScaled(text: String, sampleRate: Int, speed: Float, preferOnline: Boolean): Long {
+        val raw = predictTotalSamplesRaw(text, sampleRate, speed)
+        val profile = buildPredProfile(speed)
+        val scaled = (raw.toDouble() * profile.scaleFactor.toDouble()).toLong()
+        return scaled.coerceAtLeast(1L)
+    }
+
     private fun predictTotalSamplesRaw(text: String, sampleRate: Int, speed: Float): Long {
         val trimmed = text.trim()
-        if (trimmed.isEmpty()) return (sampleRate * PRED_MIN_MS / 1000f).toLong().coerceAtLeast(1L)
-
+        val profile = buildPredProfile(speed)
+        if (trimmed.isEmpty()) {
+            return (sampleRate * profile.minMs / 1000f).toLong().coerceAtLeast(1L)
+        }
         var sumW = 0f
         var commaCnt = 0
         var periodCnt = 0
-
         var i = 0
         while (i < trimmed.length) {
             val c = trimmed[i]
             when {
                 c == ' ' || c == '\t' || c == '\u3000' -> sumW += 0.2f
                 c in charArrayOf('，','、','；','：',',',';') -> { commaCnt++; sumW += 0.4f }
-                // 将“……”或“...”合并为一次句末停顿
                 c == '。' || c == '！' || c == '？' || c == '!' || c == '?' -> { periodCnt++; sumW += 0.6f }
                 c == '…' -> {
                     var j = i + 1
@@ -1335,39 +1368,28 @@ class TtsSynthesizer(
                     i = j - 1
                 }
                 c == '.' -> {
-                    var j = i + 1
-                    var dots = 1
+                    var j = i + 1; var dots = 1
                     while (j < trimmed.length && trimmed[j] == '.') { dots++; j++ }
                     if (dots >= 3) {
                         periodCnt += 1
                         sumW += 0.8f
                         i = j - 1
-                    } else {
-                        sumW += 0.5f
-                    }
+                    } else sumW += 0.5f
                 }
                 c.isDigit() -> sumW += 0.8f
                 c.isLetter() -> sumW += 0.6f
-                else -> sumW += 1.0f // 汉字/CJK
+                else -> sumW += 1.0f
             }
             i++
         }
-
-        val spd = speed.coerceIn(0.5f, 3.0f)
-        val msPerUnit = PRED_BASE_MS_PER_UNIT / spd
-        val pauseScale = (0.6f + 0.4f / spd) // 停顿仅部分缩放，贴近离线体感
-        val commaPauseMs = PRED_COMMA_PAUSE_MS * pauseScale
-        val periodPauseMs = PRED_PERIOD_PAUSE_MS * pauseScale
-
-        var estMs = PRED_INTERCEPT_MS + msPerUnit * sumW +
-                commaCnt * commaPauseMs + periodCnt * periodPauseMs
-        if (estMs < PRED_MIN_MS) estMs = PRED_MIN_MS
-
-        val samples = (sampleRate * estMs / 1000f).toLong()
-        return samples.coerceAtLeast(1L)
+        var estMs = profile.interceptMs +
+                profile.unitMs * sumW +
+                commaCnt * profile.commaMs +
+                periodCnt * profile.periodMs
+        if (estMs < profile.minMs) estMs = profile.minMs
+        return (sampleRate * estMs / 1000f).toLong().coerceAtLeast(1L)
     }
 
-    // ================= Bucket（speaker×speed）比例管理（含持久化） =================
     private fun currentBucketKey(): String {
         val spk = currentSpeaker.offlineModelName ?: "default"
         val bucket = String.format("%.1f", currentSpeed.coerceIn(0.5f, 3.0f))
@@ -1376,9 +1398,8 @@ class TtsSynthesizer(
 
     private fun getCurrentBucketScale(preferOnline: Boolean): Float {
         val key = currentBucketKey()
-        val online = loadScaleOnline(key) // 可能为 null
+        val online = loadScaleOnline(key)
         val overall = loadScaleOverall(key) ?: DEFAULT_INIT_SCALE
-        // 若 preferOnline 且有在线标定，则优先使用；否则用 overall
         val chosen = (if (preferOnline && online != null) online else overall).coerceIn(SCALE_MIN, SCALE_MAX)
         return chosen
     }
@@ -1429,17 +1450,15 @@ class TtsSynthesizer(
         ewmaPrefs.edit().putInt("scale_online_cnt_$bucket", value).apply()
     }
 
-    // ================== 句中动态抬分母（渐进式） ==================
     private fun maybeBoostPredictedInFlight(index: Int, sampleRate: Int) {
         val actual = actualSamplesPerSentence[index] ?: return
         val predicted = predictedSamplesPerSentence[index] ?: return
-
-        val minSamples = (sampleRate * (MID_BOOST_MIN_MS / 1000f)).toLong()
+        val profile = buildPredProfile(currentSpeed)
+        val minSamples = (sampleRate * (profile.midBoostMinMs / 1000f)).toLong()
         if (actual < minSamples) return
-
-        if (actual > (predicted * MID_BOOST_RATIO)) {
-            val target = (actual * MID_BOOST_MULT).toLong()
-            val step = (sampleRate * (MID_BOOST_STEP_MS / 1000f)).toLong().coerceAtLeast(1L)
+        if (actual > (predicted * profile.midBoostRatio)) {
+            val target = (actual * profile.midBoostMult).toLong()
+            val step = (sampleRate * (profile.midBoostStepMs / 1000f)).toLong().coerceAtLeast(1L)
             val next = min(target, predicted + step)
             if (next > predicted) {
                 predictedSamplesPerSentence[index] = next
@@ -1448,47 +1467,42 @@ class TtsSynthesizer(
         }
     }
 
-    // ================== 句末：EWMA 更新（在线优先、持久化） ==================
     private fun onSentenceFinishedForEwma(index: Int, sentence: String) {
         val predicted = predictedSamplesPerSentence.remove(index)
         val actual = actualSamplesPerSentence.remove(index)
         val bucket = bucketKeyPerSentence.remove(index)
         val source = sourcePerSentence.remove(index)
         boostedPredictedSentences.remove(index)
-
         if (predicted == null || actual == null || bucket == null || source == null) return
         if (predicted <= 0L || actual <= 0L) return
 
         val ratioRaw = (actual.toDouble() / predicted.toDouble()).toFloat()
         val ratio = ratioRaw.coerceIn(RATIO_MIN, RATIO_MAX)
-
-        // 读取现有比例与计数
         val overallBase = loadScaleOverall(bucket) ?: DEFAULT_INIT_SCALE
-        val onlineBase = loadScaleOnline(bucket) // 可能为空
+        val onlineBase = loadScaleOnline(bucket)
         val overallCnt = (countOverallByBucket[bucket] ?: loadCountOverall(bucket) ?: 0)
         val onlineCnt = (countOnlineByBucket[bucket] ?: loadCountOnline(bucket) ?: 0)
 
-        // 选择 α：在线更大，且前若干次用更大 α 快速收敛
-        val alphaForOnline = if (onlineCnt < WARMUP_ONLINE_UPDATES) ALPHA_ONLINE_WARM else ALPHA_ONLINE
-        val alphaOverall = if (source == SynthesisMode.ONLINE) ALPHA_OVERALL else ALPHA_OFFLINE
-
-        // 更新 overall
-        val newOverall = ((1f - alphaOverall) * overallBase + alphaOverall * ratio).coerceIn(SCALE_MIN, SCALE_MAX)
-        scaleOverallByBucket[bucket] = newOverall
-        saveScaleOverall(bucket, newOverall)
-        val newOverallCnt = overallCnt + 1
-        countOverallByBucket[bucket] = newOverallCnt
-        saveCountOverall(bucket, newOverallCnt)
-
-        // 若本句来自 ONLINE，再更新 online 专用比例
         if (source == SynthesisMode.ONLINE) {
-            val base = onlineBase ?: overallBase // 没有 online 时，以 overall 为起点
+            val alphaForOnline = if (onlineCnt < WARMUP_ONLINE_UPDATES) ALPHA_ONLINE_WARM else ALPHA_ONLINE
+            val base = onlineBase ?: overallBase
             val newOnline = ((1f - alphaForOnline) * base + alphaForOnline * ratio).coerceIn(SCALE_MIN, SCALE_MAX)
             scaleOnlineByBucket[bucket] = newOnline
             saveScaleOnline(bucket, newOnline)
             val newOnlineCnt2 = onlineCnt + 1
             countOnlineByBucket[bucket] = newOnlineCnt2
             saveCountOnline(bucket, newOnlineCnt2)
+            return
+        }
+
+        if (source == SynthesisMode.OFFLINE) {
+            val alphaOverall = ALPHA_OFFLINE
+            val newOverall = ((1f - alphaOverall) * overallBase + alphaOverall * ratio).coerceIn(SCALE_MIN, SCALE_MAX)
+            scaleOverallByBucket[bucket] = newOverall
+            saveScaleOverall(bucket, newOverall)
+            val newOverallCnt = overallCnt + 1
+            countOverallByBucket[bucket] = newOverallCnt
+            saveCountOverall(bucket, newOverallCnt)
         }
     }
 }
