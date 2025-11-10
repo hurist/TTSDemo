@@ -424,23 +424,8 @@ class TtsSynthesizer(
             currentCallback?.onError("文本中没有有效的句子")
             return
         }
+        sentences.addAll(result)
 
-        // 将分句结果构造成 TtsBag 队列
-        var cursor = 0
-        result.forEachIndexed { idx, seg ->
-            val start = cursor
-            val end = cursor + seg.length
-            sentences.add(
-                TtsBag(
-                    text = seg,
-                    index = idx,
-                    utteranceId = "utt_$idx",
-                    start = start,
-                    end = end
-                )
-            )
-            cursor = end
-        }
 
         // 清理句级观测缓存（EWMA 的比例字典保留，用于跨会话自适应）
         predictedSamplesPerSentence.clear()

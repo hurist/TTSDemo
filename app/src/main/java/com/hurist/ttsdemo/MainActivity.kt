@@ -135,7 +135,7 @@ class MainActivity : AppCompatActivity() {
         binding.uidInput.setText(uid.toString())
 
         // 设置默认文本
-        binding.editTextInput.setText(text)
+        binding.editTextInput.setText(textLong)
 
         // 设置语速滑动条 (0.5x到3.0x，步进0.1，默认1.0x)
         // SeekBar范围: 0-25，映射到0.5-3.0
@@ -261,9 +261,15 @@ class MainActivity : AppCompatActivity() {
                 Log.d(TAG, "开始播放第 $sentenceIndex 句，共 $totalSentences 句")
                 runOnUiThread {
                     binding.progress.apply {
-                        valueFrom = 1f
-                        valueTo = totalSentences.toFloat()
-                        value = sentenceIndex.toFloat() + 1
+                        if (totalSentences > 1) {
+                            valueFrom = 1f
+                            valueTo = totalSentences.toFloat()
+                            value = sentenceIndex.toFloat() + 1
+                        } else {
+                            valueFrom = 0f
+                            valueTo = 1f
+                            value = 1f
+                        }
                     }
                     updateStatus("播放中: ${sentenceIndex + 1}/$totalSentences, 当前句[$mode]: ${sentence.trim()}")
                 }
@@ -598,5 +604,9 @@ class MainActivity : AppCompatActivity() {
             
             夜，更深了。
             雨，还没停。""".trimIndent()
+
+        const val textLong = """
+            夜色如墨，风从远方的山谷吹来，带着湿润的草香与细碎的虫鸣。林深处，一盏孤灯在微微摇曳，映出女子清冷的侧颜。她叫沈知晚，身披青色外袍，指尖轻抚那柄泛着寒光的长剑，剑名“归霜”，是她师父临终前所赠。十年之前，她还是个无忧的少女，笑起来眼角微弯，如新月照水。十年之后，她早已学会了在笑容下隐藏悲意。她踏入这片森林，是为追查一桩旧案——“无相门”的覆灭。传言那夜血流成河，满城皆火，而唯一逃出的她，却忘了是谁推她一掌，从火海中送出。风越刮越烈，枯叶在脚边旋转，她忽然听见一阵低沉的笛声，从林子深处传来，曲调古怪，似悲似喜。她心头一紧，脚步顿住。那笛声她一生都忘不掉，正是那位“无相门”叛徒——顾辞。她缓缓拔剑，寒气与月光交织，落在她眼底如霜。脚下的土地忽然微颤，一阵气浪袭来，一道黑影掠出，带着残破的斗篷与熟悉的气息。顾辞站在她面前，目光淡漠，声音低哑：“十年了，你终于来了。”沈知晚握剑的手微微发颤，却仍挺直脊背，声音冷得像雪：“我来，是为了问你一句——那一夜，你为何救我？”顾辞沉默良久，风吹起他衣角的尘土，月光落在他脸上，那张被岁月刻出深痕的面庞忽然露出一抹苦笑：“因为……那一夜，所有人都该死，除了你。”
+        """
     }
 }
