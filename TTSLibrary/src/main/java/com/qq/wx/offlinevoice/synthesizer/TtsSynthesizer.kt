@@ -133,6 +133,7 @@ class TtsSynthesizer(
 
     private val strategyManager: SynthesisStrategyManager
     private val ttsRepository: TtsRepository
+    private val networkMonitor: NetworkMonitor = NetworkMonitor(context.applicationContext)
 
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
@@ -280,23 +281,13 @@ class TtsSynthesizer(
     }
 
     init {
-        val pathBuilder = StringBuilder()
-        PathUtils.appendExternalVoicePath(
-            byteArrayOf(68, 111, 42, 100, -19),
-            byteArrayOf(50, 0, 67, 7, -120, 65, 34, 26),
-            context, pathBuilder
-        )
-        voiceDataPath = PathUtils.appendDecodedString(
-            byteArrayOf(-105, 16, 22, -80, -70, 86, 114),
-            byteArrayOf(-72, 103, 115, -62, -33, 55, 22, -27),
-            pathBuilder
-        )
+        voiceDataPath = PathUtils.getVoicePath(context)
 
-        strategyManager = SynthesisStrategyManager(context.applicationContext)
+        strategyManager = SynthesisStrategyManager(networkMonitor)
         val onlineApi = WxReaderApi(context)
         val mp3Decoder = MediaCodecMp3Decoder(context.applicationContext)
         val ttsCache = TtsCacheImpl(context.applicationContext)
-        ttsRepository = TtsRepository(onlineApi, mp3Decoder, ttsCache)
+        ttsRepository = TtsRepository(onlineApi, mp3Decoder, ttsCache, networkMonitor)
 
         appScope.launch { commandProcessor() }
         if (instanceCount.incrementAndGet() == 1) {
@@ -718,6 +709,7 @@ class TtsSynthesizer(
         handleStop()
         commandChannel.close()
         strategyManager.release()
+        networkMonitor.release()
         if (instanceCount.decrementAndGet() == 0) {
             nativeEngine?.destroy()
             nativeEngine = null

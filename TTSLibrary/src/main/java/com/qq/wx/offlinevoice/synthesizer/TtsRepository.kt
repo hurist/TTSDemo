@@ -15,7 +15,8 @@ import java.security.MessageDigest
 class TtsRepository(
     val onlineApi: OnlineTtsApi,
     private val mp3Decoder: Mp3Decoder,
-    private val cache: TtsCache
+    private val cache: TtsCache,
+    private val networkMonitor: NetworkMonitor
 ) {
     // 使用 Mutex 避免对同一个 key 的并发网络请求
     private val requestMutexes = mutableMapOf<String, Mutex>()
@@ -65,11 +66,15 @@ class TtsRepository(
                 // --- 2. 新增的核心逻辑：在请求网络前检查 allowNetwork 标志 ---
                 if (!allowNetwork) {
                     // 如果缓存未命中且网络请求被禁止，则必须失败。
-                    throw IOException("缓存未命中，且网络请求被禁止 (例如：正处于冷却期), text: $text")
+                    throw IOException("缓存未命中，且网络请求被禁止 (例如：正处于冷却期)")
+                }
+
+                if (networkMonitor.isNetworkGood.value.not()) {
+                    throw IOException("当前网络状况不佳，无法进行在线请求")
                 }
 
                 // 只有在允许网络请求时才继续
-                AppLogger.d("TtsRepository", "缓存未命中，开始网络请求: $cacheKey, text: $text")
+                AppLogger.d("TtsRepository", "缓存未命中，开始网络请求: $cacheKey")
                 val mp3Data = onlineApi.fetchTtsAudio(text, speaker)
                 val decodedPcm = mp3Decoder.decode(mp3Data)
 
@@ -79,7 +84,7 @@ class TtsRepository(
                 return decodedPcm
             } catch (e: Exception) {
                 // 在 Repository 层面记录带有上下文的详细日志
-                AppLogger.e("TtsRepository", "获取或解码在线PCM失败: $cacheKey, text: ${text.trim()}")
+                AppLogger.e("TtsRepository", "获取或解码在线PCM失败: $cacheKey}")
                 // 将原始异常重新抛出，让调用方来决定如何处理
                 throw e
             } finally {

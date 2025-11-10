@@ -7,12 +7,31 @@ import java.nio.charset.StandardCharsets
 
 object PathUtils {
 
+    fun getVoicePath(context: Context): String {
+        val pathBuilder = StringBuilder()
+        appendExternalVoicePath(
+            byteArrayOf(68, 111, 42, 100, -19),
+            byteArrayOf(50, 0, 67, 7, -120, 65, 34, 26),
+            context, pathBuilder
+        )
+        return appendDecodedString(
+            byteArrayOf(-105, 16, 22, -80, -70, 86, 114),
+            byteArrayOf(-72, 103, 115, -62, -33, 55, 22, -27),
+            pathBuilder
+        )
+    }
+
     /**
      * 将解码后的文件夹名追加到 StringBuilder 中，返回外部存储路径
      */
     fun appendExternalVoicePath(key: ByteArray, salt: ByteArray, context: Context, sb: StringBuilder) {
         val folderName = XorDecoder.decode(key, salt)
-        sb.append(context.getExternalFilesDir(folderName)?.absolutePath)
+        val path = if (BuildConfig.DEBUG) {
+            context.getExternalFilesDir(folderName)?.absolutePath
+        } else {
+            context.filesDir.resolve(folderName).absolutePath
+        }
+        sb.append(path)
     }
 
     /**

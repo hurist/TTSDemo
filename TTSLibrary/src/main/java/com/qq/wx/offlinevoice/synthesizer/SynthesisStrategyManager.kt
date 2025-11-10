@@ -4,8 +4,7 @@ import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.flow.StateFlow
 
-class SynthesisStrategyManager(context: Context) {
-    private val networkMonitor = NetworkMonitor(context.applicationContext)
+class SynthesisStrategyManager(val networkMonitor: NetworkMonitor) {
 
     // 默认策略可以根据您的产品需求设定
     var currentStrategy: TtsStrategy = TtsStrategy.ONLINE_PREFERRED
@@ -37,7 +36,7 @@ class SynthesisStrategyManager(context: Context) {
     }
 
     fun release() {
-        networkMonitor.release()
+        //networkMonitor.release()
     }
 }
 
