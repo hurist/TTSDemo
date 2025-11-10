@@ -111,11 +111,19 @@ class TtsSynthesizer(
         val index: Int,
         val utteranceId: String,
         val start: Int,
-        val end: Int
-    )
+        val end: Int,
+        val originalGroupId: Int,   // 物理段所属的“原始行”ID
+        val partInGroup: Int,       // 行内分段序号
+        val groupStart: Int,        // 行整体开始位置
+        val groupEnd: Int           // 行整体结束位置
+    ) {
+        override fun toString(): String {
+            return "index=$index, 第$originalGroupId 段 第$partInGroup 句, text='${text.trim()}'"
+        }
+    }
     private val sentences = mutableListOf<TtsBag>()
 
-    @Volatile private var playingSentenceIndex: Int = 0
+    @Volatile private var playingSentenceIndex: Int = 0 // 仍指向“物理段”索引
     private var synthesisSentenceIndex by Delegates.observable(0) { _, oldValue, newValue ->
         AppLogger.d(TAG, "修改synthesisSentenceIndex： $oldValue -> $newValue")
     }
@@ -159,7 +167,7 @@ class TtsSynthesizer(
     private val pendingChanges = mutableSetOf<PendingChange>()
 
     // 新增：暂停期间的 seek 目标与防抖标记
-    @Volatile private var pendingSeekIndex: Int? = null
+    @Volatile private var pendingSeekIndex: Int? = null   // 逻辑行索引
     @Volatile private var pendingSeekScheduled: Boolean = false
 
     // ========= 新增：字符进度回调循环 =========
@@ -172,20 +180,31 @@ class TtsSynthesizer(
     private val scaleOverallByBucket = mutableMapOf<String, Float>()
     private val countOverallByBucket = mutableMapOf<String, Int>()
 
-    // 句级观测缓存
+    // 句级观测缓存（针对物理段）
     private val predictedSamplesPerSentence = mutableMapOf<Int, Long>()
     private val actualSamplesPerSentence = mutableMapOf<Int, Long>()
     private val bucketKeyPerSentence = mutableMapOf<Int, String>()
     private val sourcePerSentence = mutableMapOf<Int, SynthesisMode>()
     private val boostedPredictedSentences = mutableSetOf<Int>()
 
-    // —— 新增：仅用于“字符进度回调映射”的分数平滑状态（不影响播放器与日志） —— //
+    // —— 新增：仅用于“字符进度映射”的分数平滑状态（不影响播放器与日志） —— //
     @Volatile private var mapSmoothLastSentence: Int = -1
     @Volatile private var mapSmoothFrac: Float = 0f
 
     // —— 新增：BUFFERING 状态管理 —— //
     private var bufferingJob: Job? = null
     @Volatile private var bufferingSentenceIndex: Int? = null
+
+    // ================= 逻辑行映射（行粒度回调门面） =================
+    private var totalLogicalLines: Int = 0
+    private val segmentToLine = mutableListOf<Int>()           // 物理段 -> 行ID
+    private val lineFirstSegment = mutableListOf<Int>()        // 行ID -> 首物理段索引
+    private val lineLastSegment = mutableListOf<Int>()         // 行ID -> 尾物理段索引
+    private val lineTexts = mutableListOf<String>()            // 行完整文本（未经裁剪）
+    private val lineStartPos = mutableListOf<Int>()            // 行整体开始
+    private val lineEndPos = mutableListOf<Int>()              // 行整体结束
+    private val lineStarted = mutableSetOf<Int>()              // 已触发 start 的行
+    private val lineCompleted = mutableSetOf<Int>()            // 已触发 complete 的行
 
     companion object {
         private const val TAG = "TtsSynthesizer"
@@ -310,7 +329,7 @@ class TtsSynthesizer(
     /**
      * 新增：对外 seek API（按句跳转）
      */
-    fun seekToSentence(index: Int) = sendCommand(Command.SeekTo(index))
+    fun seekToSentence(index: Int) = sendCommand(Command.SeekTo(index)) // index 按“逻辑行”语义
 
     fun setToken(token: String, uid: Int) {
         ttsRepository.onlineApi.setToken(token, uid)
@@ -318,9 +337,10 @@ class TtsSynthesizer(
 
     fun isSpeaking(): Boolean = isPlaying.value
     fun getStatus(): TtsStatus {
-        val i = playingSentenceIndex.coerceAtMost(sentences.size - 1).coerceAtLeast(0)
-        val currentSentence = if (sentences.isNotEmpty() && i in sentences.indices) sentences[i].text else ""
-        return TtsStatus(currentState, sentences.size, playingSentenceIndex, currentSentence)
+        // playingSentenceIndex 指物理段，需映射到逻辑行
+        val lineId = segmentToLine.getOrNull(playingSentenceIndex) ?: 0
+        val currentSentence = lineTexts.getOrNull(lineId) ?: ""
+        return TtsStatus(currentState, totalLogicalLines, lineId, currentSentence)
     }
     private fun sendCommand(command: Command) { commandChannel.trySend(command) }
 
@@ -342,37 +362,49 @@ class TtsSynthesizer(
                     currentCallback?.onInitialized(true)
                 }
                 is Command.InternalSentenceStart -> {
-                    playingSentenceIndex = command.index
-                    currentCallback?.onSentenceStart(
-                        sentenceIndex = command.index,
-                        sentence = command.sentence,
-                        totalSentences = sentences.size,
-                        mode = command.mode,
-                        startPos = command.startPos,
-                        endPos = command.endPos,
-                    )
-                    AppLogger.d(TAG, "修改句子索引为 ${command.index}: ${command.sentence}")
-                    // 句首立即给一次 0 位回调，改善可见联动
-                    currentCallback?.onSentenceProgressChanged(
-                        sentenceIndex = command.index,
-                        sentence = command.sentence,
-                        progress = 0,
-                        char = "",
-                        startPos = command.startPos,
-                        endPos = command.endPos,
-                    )
+                    // 映射到逻辑行
+                    val lineId = segmentToLine.getOrNull(command.index) ?: command.index
+                    playingSentenceIndex = command.index // 内部仍记录物理段
+                    if (!lineStarted.contains(lineId)) {
+                        lineStarted.add(lineId)
+                        currentCallback?.onSentenceStart(
+                            sentenceIndex = lineId,
+                            sentence = lineTexts.getOrNull(lineId) ?: command.sentence,
+                            totalSentences = totalLogicalLines,
+                            mode = command.mode,
+                            startPos = lineStartPos.getOrNull(lineId) ?: command.startPos,
+                            endPos = lineEndPos.getOrNull(lineId) ?: command.endPos,
+                        )
+                        AppLogger.d(TAG, "修改句子索引为 ${lineId}: ${lineTexts.getOrNull(lineId) ?: command.sentence}")
+                        currentCallback?.onSentenceProgressChanged(
+                            sentenceIndex = lineId,
+                            sentence = lineTexts.getOrNull(lineId) ?: command.sentence,
+                            progress = 0,
+                            char = "",
+                            startPos = lineStartPos.getOrNull(lineId) ?: command.startPos,
+                            endPos = lineEndPos.getOrNull(lineId) ?: command.endPos,
+                        )
+                    }
                 }
                 is Command.InternalSentenceEnd -> {
-                    onSentenceFinishedForEwma(command.index, command.sentence)
-                    currentCallback?.onSentenceComplete(command.index, command.sentence)
-                    if (upgradeWindowActive && command.index == upgradeProtectedIndex) {
-                        AppLogger.i(TAG, "受保护句 #$upgradeProtectedIndex 已结束，关闭升级窗口。")
-                        upgradeWindowActive = false
-                        upgradeProtectedIndex = -1
-                    }
-                    if (command.index == sentences.size - 1 && !isPausedByError) {
-                        updateState(TtsPlaybackState.IDLE)
-                        currentCallback?.onSynthesisComplete()
+                    val lineId = segmentToLine.getOrNull(command.index) ?: command.index
+                    // 仅当该物理段是该行最后一段时触发 complete
+                    if (!lineCompleted.contains(lineId) && command.index == lineLastSegment.getOrNull(lineId)) {
+                        lineCompleted.add(lineId)
+                        onSentenceFinishedForEwma(command.index, command.sentence)
+                        currentCallback?.onSentenceComplete(lineId, lineTexts.getOrNull(lineId) ?: command.sentence)
+                        if (upgradeWindowActive && command.index == upgradeProtectedIndex) {
+                            AppLogger.i(TAG, "受保护句 #$upgradeProtectedIndex 已结束，关闭升级窗口。")
+                            upgradeWindowActive = false
+                            upgradeProtectedIndex = -1
+                        }
+                        if (lineId == totalLogicalLines - 1 && !isPausedByError) {
+                            updateState(TtsPlaybackState.IDLE)
+                            currentCallback?.onSynthesisComplete()
+                        }
+                    } else {
+                        // 非最后段：仍需统计 EWMA，但不触发外部 complete 回调
+                        onSentenceFinishedForEwma(command.index, command.sentence)
                     }
                 }
                 is Command.InternalSynthesisFinished -> { /* no-op */ }
@@ -414,6 +446,15 @@ class TtsSynthesizer(
         pendingSeekIndex = null
         pendingSeekScheduled = false
         sentences.clear()
+        lineStarted.clear()
+        lineCompleted.clear()
+        segmentToLine.clear()
+        lineFirstSegment.clear()
+        lineLastSegment.clear()
+        lineTexts.clear()
+        lineStartPos.clear()
+        lineEndPos.clear()
+        totalLogicalLines = 0
 
         val result = when (splitterStrategy) {
             SentenceSplitterStrategy.NEWLINE -> SentenceSplitter.sentenceSplitListByLine(text)
@@ -426,6 +467,8 @@ class TtsSynthesizer(
         }
         sentences.addAll(result)
 
+        // 构建逻辑行映射
+        buildLogicalLineMapping(text)
 
         // 清理句级观测缓存（EWMA 的比例字典保留，用于跨会话自适应）
         predictedSamplesPerSentence.clear()
@@ -446,6 +489,30 @@ class TtsSynthesizer(
         updateState(TtsPlaybackState.PLAYING)
         currentCallback?.onSynthesisStart()
         startSynthesis()
+    }
+
+    private fun buildLogicalLineMapping(fullText: String) {
+        // 按 originalGroupId 分组
+        val grouped = sentences.groupBy { it.originalGroupId }
+        totalLogicalLines = grouped.size
+        grouped.toSortedMap().forEach { (lineId, segs) ->
+            val first = segs.minBy { it.partInGroup }
+            val last = segs.maxBy { it.partInGroup }
+            lineFirstSegment.add(first.index)
+            lineLastSegment.add(last.index)
+            lineStartPos.add(first.groupStart)
+            lineEndPos.add(first.groupEnd)
+            lineTexts.add(fullText.substring(first.groupStart, first.groupEnd))
+            segs.forEach { s -> segmentToLine.addIndexedEnsureCapacity(s.index, lineId) }
+        }
+    }
+
+    // Helper to ensure segmentToLine size
+    private fun MutableList<Int>.addIndexedEnsureCapacity(index: Int, value: Int) {
+        if (index >= size) {
+            repeat(index - size + 1) { add(-1) }
+        }
+        this[index] = value
     }
 
     private suspend fun handleSetSpeed(speed: Float) {
@@ -540,7 +607,8 @@ class TtsSynthesizer(
 
         if (needParamRestart || needErrorRestart || needSeekRestart) {
             AppLogger.i(TAG, "恢复前需要重启合成：pendingChanges=$pendingChanges, pendingSeekIndex=$pendingSeekIndex, isPausedByError=$needErrorRestart。")
-            val restartIndex = pendingSeekIndex ?: playingSentenceIndex
+            val restartLine = pendingSeekIndex ?: segmentToLine.getOrNull(playingSentenceIndex) ?: 0
+            val firstSeg = lineFirstSegment.getOrNull(restartLine) ?: playingSentenceIndex
 
             // 清标志
             pendingChanges.clear()
@@ -556,10 +624,11 @@ class TtsSynthesizer(
             synthesisJob = null
             AppLogger.d(TAG, "恢复前：旧的合成任务已取消并结束。")
 
-            // 清空播放队列，回拨到目标句索引
+            // 清空播放队列，回拨到目标物理段索引
             audioPlayer.resetBlocking()
             AppLogger.d(TAG, "恢复前：播放器已同步重置（清空队列）。")
-            synthesisSentenceIndex = restartIndex
+            synthesisSentenceIndex = firstSeg
+            playingSentenceIndex = firstSeg
 
             // 清理句级观测缓存，避免不同参数污染
             predictedSamplesPerSentence.clear()
@@ -570,7 +639,7 @@ class TtsSynthesizer(
 
             // 新会话下启动合成
             startSynthesis()
-            AppLogger.d(TAG, "恢复前：新的合成任务已从索引 $synthesisSentenceIndex 处启动（将用新参数/seek 重新合成当前句）。")
+            AppLogger.d(TAG, "恢复前：新的合成任务已从物理段索引 $synthesisSentenceIndex 处启动（逻辑行=$restartLine）。")
         }
 
         updateState(TtsPlaybackState.PLAYING)
@@ -608,6 +677,16 @@ class TtsSynthesizer(
         sentences.clear()
         upgradeWindowActive = false
         upgradeProtectedIndex = -1
+        segmentToLine.clear()
+        lineFirstSegment.clear()
+        lineLastSegment.clear()
+        lineTexts.clear()
+        lineStartPos.clear()
+        lineEndPos.clear()
+        lineStarted.clear()
+        lineCompleted.clear()
+        totalLogicalLines = 0
+
         updateState(TtsPlaybackState.IDLE)
         AppLogger.d(TAG, "状态已置为 IDLE。")
 
@@ -652,8 +731,8 @@ class TtsSynthesizer(
      * - 从当前句索引重启合成。
      */
     private suspend fun softRestart() {
-        AppLogger.d(TAG, "软重启请求，句子索引: $playingSentenceIndex")
-        val restartIndex = playingSentenceIndex
+        AppLogger.d(TAG, "软重启请求，句子索引(物理段): $playingSentenceIndex")
+        val restartSegIndex = playingSentenceIndex
 
         // 重置会话作用域
         newSessionScope()
@@ -672,9 +751,9 @@ class TtsSynthesizer(
         sourcePerSentence.clear()
         boostedPredictedSentences.clear()
 
-        synthesisSentenceIndex = restartIndex
+        synthesisSentenceIndex = restartSegIndex
         startSynthesis()
-        AppLogger.d(TAG, "新的合成任务已从索引 $restartIndex 处启动。")
+        AppLogger.d(TAG, "新的合成任务已从物理段索引 $restartSegIndex 处启动。")
     }
 
     // 暂停期：仅在“第一次新增变更项/seek”时执行预备重启（防抖）
@@ -702,50 +781,48 @@ class TtsSynthesizer(
 
     /**
      * 处理 seek 命令：
-     * - 规范化目标句（跳过空句，方向优先向后，末尾向前）；
-     * - PLAYING：立即生效（会话隔离、清队、从目标句重启合成），并立即更新 playingSentenceIndex；
-     * - PAUSED：立即更新 playingSentenceIndex，并记录 pendingSeekIndex；
-     *         仅第一次 seek 时清队（scheduleParamRestartWhilePaused 防抖），恢复时统一生效。
+     * 外部 index 按“逻辑行”编号；内部需要跳到该行首物理段。
      */
-    private suspend fun handleSeekTo(requestedIndex: Int) {
-        if (sentences.isEmpty()) {
-            AppLogger.w(TAG, "handleSeekTo: 当前没有可用句子，忽略 seek 请求(index=$requestedIndex)。")
+    private suspend fun handleSeekTo(requestedLineIndex: Int) {
+        if (totalLogicalLines == 0) {
+            AppLogger.w(TAG, "handleSeekTo: 当前没有可用(逻辑行)句子，忽略 seek 请求(index=$requestedLineIndex)。")
             return
         }
-        val target = resolveSeekIndex(requestedIndex)
-        if (target == playingSentenceIndex) {
-            AppLogger.i(TAG, "handleSeekTo: 目标句与当前句相同(index=$target)，按规则忽略。")
+        val clamped = requestedLineIndex.coerceIn(0, totalLogicalLines - 1)
+        val targetSeg = lineFirstSegment.getOrNull(clamped)
+        if (targetSeg == null) {
+            AppLogger.w(TAG, "handleSeekTo: 找不到行首物理段，行=$clamped")
+            return
+        }
+        val currentLine = segmentToLine.getOrNull(playingSentenceIndex) ?: 0
+        if (clamped == currentLine) {
+            AppLogger.i(TAG, "handleSeekTo: 目标逻辑行与当前行相同(index=$clamped)，忽略。")
             return
         }
 
         when (currentState) {
             TtsPlaybackState.PLAYING -> {
-                // 立即生效
-                AppLogger.i(TAG, "handleSeekTo: 播放中收到 seek 到句子 #$target，立即切换。")
-                playingSentenceIndex = target // 进度立即更新
-                // 会话隔离与硬清队
+                AppLogger.i(TAG, "handleSeekTo: 播放中收到 seek 到逻辑行 #$clamped (物理段=$targetSeg)，立即切换。")
                 newSessionScope()
                 synthesisJob?.cancelAndJoin()
                 synthesisJob = null
                 audioPlayer.resetBlocking()
-                AppLogger.d(TAG, "handleSeekTo: 播放中，已取消旧任务并清空队列，准备从 #$target 重启。")
+                AppLogger.d(TAG, "handleSeekTo: 播放中，已取消旧任务并清空队列，准备从物理段 #$targetSeg 重启。")
 
-                // 清缓存
                 predictedSamplesPerSentence.clear()
                 actualSamplesPerSentence.clear()
                 bucketKeyPerSentence.clear()
                 sourcePerSentence.clear()
                 boostedPredictedSentences.clear()
 
-                synthesisSentenceIndex = target
+                synthesisSentenceIndex = targetSeg
+                playingSentenceIndex = targetSeg
                 startSynthesis()
-                AppLogger.d(TAG, "handleSeekTo: 新的合成任务已从索引 $target 启动。")
+                AppLogger.d(TAG, "handleSeekTo: 新的合成任务已从物理段索引 $targetSeg (逻辑行=$clamped) 启动。")
             }
             TtsPlaybackState.PAUSED -> {
-                // 暂停：立即更新索引，延后生效，防抖清队
-                AppLogger.i(TAG, "handleSeekTo: 暂停中收到 seek 到句子 #$target，将在恢复时生效，进度立即更新。")
-                playingSentenceIndex = target // 进度立即更新
-                pendingSeekIndex = target
+                AppLogger.i(TAG, "handleSeekTo: 暂停中收到 seek 到逻辑行 #$clamped，将在恢复时生效。")
+                pendingSeekIndex = clamped
                 if (!pendingSeekScheduled) {
                     scheduleParamRestartWhilePaused("seekTo")
                     pendingSeekScheduled = true
@@ -761,53 +838,14 @@ class TtsSynthesizer(
 
     /**
      * 解析并归一化 seek 目标：
-     * - 越界裁切；
-     * - 若目标句为空：
-     *   - 若不是最后一句：沿“向后”方向跳过连续空句，找到第一个非空句；
-     *   - 否则（位于末尾）：沿“向前”方向跳过连续空句，找到第一个非空句；
-     * - 若全为空（极端）：保持不动（返回 playingSentenceIndex），并打印警告。
+     * 逻辑行维度（保留空行原样），沿用原策略即可。
      */
     private fun resolveSeekIndex(requestedIndex: Int): Int {
-        if (sentences.isEmpty()) return 0
-        val clamped = requestedIndex.coerceIn(0, sentences.size - 1)
-
-        fun isEmptyAt(i: Int): Boolean {
-            if (i !in sentences.indices) return true
-            return sentences[i].text.trim().isEmpty()
-        }
-
-        if (!isEmptyAt(clamped)) return clamped
-
-        // 优先向后（非最后一句时）
-        if (clamped < sentences.lastIndex) {
-            var i = clamped + 1
-            while (i <= sentences.lastIndex && isEmptyAt(i)) i++
-            if (i <= sentences.lastIndex) {
-                AppLogger.d(TAG, "resolveSeekIndex: 目标为空句，按规则向后跳至第一个非空句 index=$i", important = true)
-                return i
-            }
-        }
-
-        // 向前寻找
-        var j = (clamped - 1).coerceAtLeast(0)
-        while (j >= 0 && isEmptyAt(j)) j--
-        if (j >= 0) {
-            AppLogger.d(TAG, "resolveSeekIndex: 目标为空句且位于末尾或后续也为空，向前跳至第一个非空句 index=$j", important = true)
-            return j
-        }
-
-        // 全为空：保持现状
-        AppLogger.w(TAG, "resolveSeekIndex: 文本全为空或无法找到非空句，保持当前索引不变 index=$playingSentenceIndex")
-        return playingSentenceIndex
+        if (totalLogicalLines == 0) return 0
+        return requestedIndex.coerceIn(0, totalLogicalLines - 1)
     }
 
     // ============ 合成逻辑 ============
-    /**
-     * 启动合成任务（在新会话作用域下运行）。
-     * 并行子任务：
-     * 1) 核心合成循环（launchSynthesisLoop）
-     * 2) 网络状态哨兵（ONLINE_PREFERRED 下，网络坏->好时触发保护性升级）
-     */
     private fun startSynthesis() {
         resetOnlineCooldown()
         val sessionScope = newSessionScope()
@@ -820,13 +858,11 @@ class TtsSynthesizer(
                 synthesisLoopJob = launchSynthesisLoop()
             }
 
-            // ONLINE_PREFERRED：网络恢复进行在线升级
             if (strategyManager.currentStrategy == TtsStrategy.ONLINE_PREFERRED) {
                 launch {
                     var wasNetworkBad = !strategyManager.isNetworkGood.value
                     strategyManager.isNetworkGood.collect { isNetworkGood ->
                         if (wasNetworkBad && isNetworkGood) {
-                            // 稳定窗口去抖
                             delay(NETWORK_STABILIZE_MS)
                             if (!strategyManager.isNetworkGood.value) {
                                 AppLogger.i(TAG, "网络恢复检测在稳定窗口后失效，取消本次升级触发。")
@@ -844,7 +880,7 @@ class TtsSynthesizer(
 
                             synthesisLoopJob?.cancelAndJoin()
 
-                            val protectedIndex = playingSentenceIndex
+                            val protectedIndex = playingSentenceIndex // 物理段索引
                             audioPlayer.resetQueueOnlyBlocking(preserveSentenceIndex = protectedIndex)
 
                             upgradeWindowActive = true
@@ -863,14 +899,10 @@ class TtsSynthesizer(
                 }
             }
 
-            // 首次启动合成循环
             runSynthesisLoop()
         }
     }
 
-    /**
-     * 核心合成循环（依赖协程取消语义；边界统一调用 Guarded 入队与回调）。
-     */
     private fun CoroutineScope.launchSynthesisLoop() = launch {
         var synthesisFailed = false
         try {
@@ -959,12 +991,6 @@ class TtsSynthesizer(
         }
     }
 
-    /**
-     * 在线合成（缓存优先）。
-     * - 非空句但无 PCM => Failure（避免仅凭 Marker 推进）。
-     * - 空句（trim 为空）仍 START/END => Success。
-     * - 边界统一用 Guarded 方法入队与回调闭包，集中会话守卫。
-     */
     private suspend fun performOnlineSynthesis(index: Int, bag: TtsBag): SynthesisResult {
         try {
             if (!coroutineContext.isActive || !isSessionActive()) return SynthesisResult.Deferred
@@ -972,7 +998,7 @@ class TtsSynthesizer(
             val sentence = bag.text
             val trimmed = sentence.trim()
             if (trimmed.isEmpty()) {
-                AppLogger.w(TAG, "句子 $index 内容为空，跳过在线合成。", important = true)
+                AppLogger.w(TAG, "句子 $bag, 内容为空，跳过在线合成。", important = true)
                 enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.ONLINE) {
                     if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, sentence, SynthesisMode.ONLINE, bag.start, bag.end))
                 }
@@ -981,14 +1007,15 @@ class TtsSynthesizer(
                 }
                 return SynthesisResult.Success
             }
-            AppLogger.d(TAG, "合成[在线]句子 $index: \"$trimmed\"", important = true)
+            AppLogger.d(TAG, "合成[在线]句子 $bag", important = true)
             val start = System.currentTimeMillis()
 
             val isCoolingDown = System.currentTimeMillis() < onlineCooldownUntilTimestamp
 
             val strategy = strategyManager.currentStrategy
+            val lineId = bag.originalGroupId
             val shouldBuffer = (strategy == TtsStrategy.ONLINE_PREFERRED || strategy == TtsStrategy.ONLINE_ONLY) &&
-                    (index == playingSentenceIndex || index == playingSentenceIndex + 1)
+                    (lineId == segmentToLine.getOrNull(playingSentenceIndex) && bag.partInGroup == 0 /*|| lineId == (segmentToLine.getOrNull(playingSentenceIndex) ?: 0) + 1*/)
 
             if (shouldBuffer) {
                 scheduleBufferingIfNeeded(index)
@@ -1007,15 +1034,14 @@ class TtsSynthesizer(
             val pcmData = decoded.pcmData
             val sampleRate = decoded.sampleRate
             if (pcmData.isEmpty()) {
-                val reason = "在线合成未产出PCM（非空句），index=$index"
+                val reason = "在线合成未产出PCM（非空句），$bag"
                 AppLogger.w(TAG, reason, important = true)
                 return SynthesisResult.Failure(reason)
             }
 
             val duration = System.currentTimeMillis() - start
-            AppLogger.d(TAG, "在线合成句子 $index 成功，PCM 大小=${pcmData.size}, 采样率=$sampleRate, 耗时：$duration ms, 句子：$trimmed", important = true)
+            AppLogger.d(TAG, "在线合成句子 $bag 成功，PCM 大小=${pcmData.size}, 采样率=$sampleRate, 耗时：$duration ms, 句子：$trimmed", important = true)
 
-            // 在线：不设置预测分母，不加入 predictedSamplesPerSentence（方案A）
             enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.ONLINE) {
                 if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, sentence, SynthesisMode.ONLINE, startPos = bag.start, endPos = bag.end))
             }
@@ -1049,27 +1075,20 @@ class TtsSynthesizer(
             return SynthesisResult.Success
         } catch (e: WxApiException) {
             val code = e.errorCode
-            val reason = "合成[在线] (句子 $index)失败: ${e.message}, code=$code"
+            val reason = "合成[在线] (句子 $bag)失败: ${e.message}, code=$code"
             AppLogger.e(TAG, reason, important = true)
             return SynthesisResult.Failure(reason)
         } catch (e: Exception) {
-            val reason = "合成[在线] (句子 $index)失败: ${e.message}"
+            val reason = "合成[在线] (句子 $bag)失败: ${e.message}"
             AppLogger.e(TAG, reason, important = true)
             return SynthesisResult.Failure(reason)
         }
     }
 
-    /**
-     * 离线合成。
-     * - 保护期且目标句不是受保护句：返回 Deferred（不上产、不推进）；
-     * - 边界统一用 Guarded 方法入队与回调闭包，集中会话守卫。
-     *
-     * 保持流式分块入队，但在句首先设置“预测总样本数”，稳定分母，避免进度回退。
-     */
     private suspend fun performOfflineSynthesis(index: Int, bag: TtsBag): SynthesisResult {
         if (!coroutineContext.isActive || !isSessionActive()) return SynthesisResult.Deferred
         if (audioPlayer.isInProtection() && index != audioPlayer.getProtectedSentenceIndex()) {
-            AppLogger.i(TAG, "离线合成请求被延后：当前处于保护期，受保护句=${audioPlayer.getProtectedSentenceIndex()}，请求句=$index")
+            AppLogger.i(TAG, "离线合成请求被延后：当前处于保护期，受保护句=${audioPlayer.getProtectedSentenceIndex()}，请求句=$index, groupIndex:${bag.partInGroup}")
             return SynthesisResult.Deferred
         }
 
@@ -1078,17 +1097,16 @@ class TtsSynthesizer(
             try {
                 val trimmed = sentence.trim()
                 if (trimmed.isEmpty()) {
-                    AppLogger.w(TAG, "句子 $index 内容为空，跳过离线合成。", important = true)
+                    AppLogger.w(TAG, "句子 $bag 内容为空，跳过离线合成。", important = true)
                     return@withLock SynthesisResult.Success
                 }
                 if (!coroutineContext.isActive || !isSessionActive()) {
-                    AppLogger.i(TAG, "离线合成开始前会话不活跃/已取消，index=$index -> Deferred")
+                    AppLogger.i(TAG, "离线合成开始前会话不活跃/已取消，$bag -> Deferred")
                     return@withLock SynthesisResult.Deferred
                 }
 
-                AppLogger.d(TAG, "合成[离线]句子 $index: \"$trimmed\"", important = true)
+                AppLogger.d(TAG, "合成[离线]句子 $bag", important = true)
 
-                // 自适应预测（离线）
                 val predicted = predictTotalSamplesScaled(
                     text = trimmed,
                     sampleRate = TtsConstants.DEFAULT_SAMPLE_RATE,
@@ -1103,7 +1121,7 @@ class TtsSynthesizer(
 
                 val prepare = prepareForSynthesis(trimmed, currentSpeed, currentVolume)
                 if (prepare != 0) {
-                    val reason = "合成[离线]句子准备失败 (code=$prepare) 句子: $trimmed"
+                    val reason = "合成[离线]句子准备失败 (code=$prepare) 句子: $bag"
                     AppLogger.e(TAG, "prepare 失败：$reason（按成功跳过处理，避免打断整体流程）")
                     return@withLock SynthesisResult.Success
                 }
@@ -1116,7 +1134,7 @@ class TtsSynthesizer(
                 var hasStart = false
                 while (coroutineContext.isActive && isSessionActive()) {
                     if (audioPlayer.isInProtection() && index != audioPlayer.getProtectedSentenceIndex()) {
-                        AppLogger.i(TAG, "离线合成过程中进入/仍在保护期，句子 $index 延后（Deferred）。", important = true)
+                        AppLogger.i(TAG, "离线合成过程中进入/仍在保护期，句子 $bag 延后（Deferred）。", important = true)
                         return@withLock SynthesisResult.Deferred
                     }
 
@@ -1149,7 +1167,7 @@ class TtsSynthesizer(
                     }
                     delay(1)
                 }
-                AppLogger.d(TAG, "离线合成句子 $index 完成。 句子：$trimmed", important = true)
+                AppLogger.d(TAG, "离线合成句子 $bag 完成。 句子：$trimmed", important = true)
                 if (coroutineContext.isActive && isSessionActive()) {
                     if (!hasStart) {
                         enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.OFFLINE, startCb)
@@ -1158,9 +1176,9 @@ class TtsSynthesizer(
                 }
                 SynthesisResult.Success
             } catch (e: CancellationException) {
-                SynthesisResult.Failure("合成[离线](句子 $index, ${sentence.trim()})协程被取消")
+                SynthesisResult.Failure("合成[离线](句子 $bag, ${sentence.trim()})协程被取消")
             } catch (e: Exception) {
-                val reason = "合成[离线](句子 $index, ${sentence.trim()})异常: ${e.message}"
+                val reason = "合成[离线](句子 $bag)异常: ${e.message}"
                 AppLogger.e(TAG, reason, e, important = true)
                 SynthesisResult.Failure(reason)
             } finally {
@@ -1237,20 +1255,20 @@ class TtsSynthesizer(
     private fun startCharacterProgressLoop() {
         if (characterProgressJob?.isActive == true) return
         characterProgressJob = appScope.launch(Dispatchers.Default) {
-            var lastSentence = -1
-            var lastCharIdx = -1
+            var lastLine = -1
+            var lastCharIdxInLine = -1
             while (isActive && currentState == TtsPlaybackState.PLAYING) {
                 val progress = audioPlayer.getCurrentSentenceProgress()
                 if (progress != null) {
-                    val sIdx = progress.sentenceIndex
-                    val bag = sentences.getOrNull(sIdx) ?: continue
-                    val text = bag.text
-                    val charCount = text.length // 如需去空白可用 text.trim().length
+                    val segmentIdx = progress.sentenceIndex
+                    val bag = sentences.getOrNull(segmentIdx) ?: continue
+                    val lineId = segmentToLine.getOrNull(segmentIdx) ?: bag.originalGroupId
+                    val fullLineText = lineTexts.getOrNull(lineId) ?: bag.text
+                    val charCount = fullLineText.length
                     if (charCount > 0) {
-                        // —— 新增：仅用于“字符进度映射”的分数轻量平滑（不改底层进度与日志） —— //
                         val rawFrac = progress.fraction.coerceIn(0f, 1f)
-                        val frac = if (sIdx != mapSmoothLastSentence) {
-                            mapSmoothLastSentence = sIdx
+                        val frac = if (lineId != mapSmoothLastSentence) {
+                            mapSmoothLastSentence = lineId
                             mapSmoothFrac = rawFrac
                             rawFrac
                         } else {
@@ -1258,33 +1276,37 @@ class TtsSynthesizer(
                             mapSmoothFrac
                         }
 
-                        // 将比例映射为 [0, charCount-1] 的索引（标点邻域扩散，缓解“到标点突然快一截”）
-                        val idx = mapFractionToWeightedIndex(text, frac)
-                        if (sIdx != lastSentence || idx != lastCharIdx) {
+                        // 当前物理段内部字符索引（估算）
+                        val segLocalIndex = mapFractionToWeightedIndex(bag.text, frac)
+                        // 行内偏移 = 段起始相对行起始 + 段内索引
+                        val baseOffsetInLine = bag.start - bag.groupStart
+                        val lineCharIndex = (baseOffsetInLine + segLocalIndex).coerceAtMost(charCount - 1).coerceAtLeast(0)
+
+                        if (lineId != lastLine || lineCharIndex != lastCharIdxInLine) {
                             currentCallback?.onSentenceProgressChanged(
-                                sentenceIndex = sIdx,
-                                sentence = text,
-                                progress = idx,
-                                char = text.getOrNull(idx)?.toString() ?: "",
-                                startPos = bag.start,
-                                endPos = bag.end
+                                sentenceIndex = lineId,
+                                sentence = fullLineText,
+                                progress = lineCharIndex,
+                                char = fullLineText.getOrNull(lineCharIndex)?.toString() ?: "",
+                                startPos = bag.groupStart,
+                                endPos = bag.groupEnd
                             )
-                            lastSentence = sIdx
-                            lastCharIdx = idx
+                            lastLine = lineId
+                            lastCharIdxInLine = lineCharIndex
                         }
                     } else {
-                        // 空句：固定回调 0
-                        if (sIdx != lastSentence || lastCharIdx != 0) {
+                        // 空行：固定回调 0
+                        if (lineId != lastLine || lastCharIdxInLine != 0) {
                             currentCallback?.onSentenceProgressChanged(
-                                sentenceIndex = sIdx,
+                                sentenceIndex = lineId,
                                 sentence = "",
                                 progress = 0,
                                 char = "",
-                                startPos = bag.start,
-                                endPos = bag.end
+                                startPos = bag.groupStart,
+                                endPos = bag.groupEnd
                             )
-                            lastSentence = sIdx
-                            lastCharIdx = 0
+                            lastLine = lineId
+                            lastCharIdxInLine = 0
                         }
                     }
                 }

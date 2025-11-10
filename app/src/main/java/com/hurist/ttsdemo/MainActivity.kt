@@ -285,18 +285,22 @@ class MainActivity : AppCompatActivity() {
                     when (newState) {
                         TtsPlaybackState.IDLE -> {
                             updateStatus("空闲")
+                            binding.buttonPlay.text = "播放"
                         }
 
                         TtsPlaybackState.PLAYING -> {
-                            updateStatus("播放中")
+                            //updateStatus("播放中")
+                            binding.buttonPlay.text = "暂停"
                         }
 
                         TtsPlaybackState.PAUSED -> {
-                            updateStatus("已暂停")
+                            //updateStatus("已暂停")
+                            binding.buttonPlay.text = "继续"
                         }
 
                         TtsPlaybackState.BUFFERING -> {
                             updateStatus("缓冲中")
+                            binding.buttonPlay.text = "加载中"
                         }
                     }
                 }
@@ -376,9 +380,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         tts = TtsSynthesizer(this, currentVoice, callback)
-        tts!!.isPlaying.onEach {
+       /* tts!!.isPlaying.onEach {
             binding.buttonPause.text = if (it) "暂停" else "继续"
-        }.launchIn(lifecycleScope)
+        }.launchIn(lifecycleScope)*/
 
     }
 

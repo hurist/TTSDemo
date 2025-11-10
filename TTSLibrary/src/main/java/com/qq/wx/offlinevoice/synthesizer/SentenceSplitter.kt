@@ -95,34 +95,40 @@ object SentenceSplitter {
         return result
     }
 
+    /**
+     * 基于“句末标点”切分，返回 TtsBag 列表。
+     * 这里每一个片段视作一行（无换行场景），originalGroupId=idx，partInGroup=0。
+     */
     fun sentenceSplitList(text: String): List<TtsSynthesizer.TtsBag> {
         val ranges = sentenceSplitByPeriod(text)
-        val result = ArrayList<TtsSynthesizer.TtsBag>(ranges.size)
-        ranges.forEachIndexed { idx, range ->
-            val segment = safeSubstring(text, range.start, range.end)
-            result.add(
+        val bags = ArrayList<TtsSynthesizer.TtsBag>(ranges.size)
+        ranges.forEachIndexed { idx, r ->
+            val segment = safeSubstring(text, r.start, r.end)
+            bags.add(
                 TtsSynthesizer.TtsBag(
                     text = segment,
                     index = idx,
                     utteranceId = "utt_$idx",
-                    start = range.start,
-                    end = range.end
+                    start = r.start,
+                    end = r.end,
+                    originalGroupId = idx,
+                    partInGroup = 0,
+                    groupStart = r.start,
+                    groupEnd = r.end
                 )
             )
         }
-        return result
+        return bags
     }
 
     /**
-     * 按换行分割，并应用“每段最多 250 字”的简化规则。
-     * 超长行的拆分逻辑：
-     *   - 在 250 位置向前扫描标点；若找到，切分点=该标点位置+1；
-     *   - 未找到标点则切分点=起始位置+250；
-     *   - 递归处理剩余文本。
+     * 先按换行分割，再对每行应用“最多 250 字”的切分规则，返回物理段列表（TtsBag）。
+     * 超长行拆分：从 250 处向前寻找最近标点（句末/停顿/分隔），若找到则切在标点之后；否则硬切 250。
+     * 所有分段保留行元数据 originalGroupId / partInGroup / groupStart / groupEnd。
      */
     fun sentenceSplitListByLine(text: String): List<TtsSynthesizer.TtsBag> {
         val MAX_LEN = 150
-        val initialRanges = toSplit(listOf(BagRange(0, text.length, 0, false)), text, RegexConfig.LineBreak)
+        val lineRanges = toSplit(listOf(BagRange(0, text.length, 0, false)), text, RegexConfig.LineBreak)
 
         val punctuationSet = hashSetOf(
             '。','?','？','!','！','…',
@@ -131,57 +137,46 @@ object SentenceSplitter {
             '、'
         )
 
-        fun splitLongRange(range: BagRange): List<BagRange> {
-            val res = mutableListOf<BagRange>()
-            var curStart = range.start
-            val end = range.end
-            while (end - curStart > MAX_LEN) {
+        data class Piece(val start: Int, val end: Int, val lineId: Int, val part: Int, val lineStart: Int, val lineEnd: Int)
+
+        val pieces = mutableListOf<Piece>()
+        lineRanges.forEachIndexed { lineIdx, r ->
+            var curStart = r.start
+            val lineEnd = r.end
+            var part = 0
+            while (lineEnd - curStart > MAX_LEN) {
                 val tentativeCut = curStart + MAX_LEN
-                // 回扫标点（不跨越行末）
                 var cut = -1
                 var i = tentativeCut - 1
                 while (i >= curStart) {
                     val c = text.getOrNull(i)
-                    if (c != null && c in punctuationSet) {
-                        cut = i + 1 // 包含标点
-                        break
-                    }
+                    if (c != null && c in punctuationSet) { cut = i + 1; break }
                     i--
                 }
-                if (cut == -1) {
-                    cut = tentativeCut // 无标点，硬切
-                }
-                res += BagRange(curStart, cut, range.type, false)
+                if (cut == -1) cut = tentativeCut
+                pieces += Piece(curStart, cut, lineIdx, part, r.start, r.end)
                 curStart = cut
+                part++
             }
-            // 剩余部分
-            if (curStart < end) {
-                res += BagRange(curStart, end, range.type, false)
-            }
-            return res
-        }
-
-        val normalized = mutableListOf<BagRange>()
-        for (r in initialRanges) {
-            val len = r.end - r.start
-            if (len > MAX_LEN) {
-                normalized += splitLongRange(r)
-            } else {
-                normalized += r
+            if (curStart < lineEnd) {
+                pieces += Piece(curStart, lineEnd, lineIdx, part, r.start, r.end)
             }
         }
 
-        // 转为 TtsBag（重新编号）
-        val bags = ArrayList<TtsSynthesizer.TtsBag>(normalized.size)
-        normalized.forEachIndexed { idx, r ->
-            val segment = safeSubstring(text, r.start, r.end)
+        val bags = ArrayList<TtsSynthesizer.TtsBag>(pieces.size)
+        pieces.forEachIndexed { segIdx, p ->
+            val segment = safeSubstring(text, p.start, p.end)
             bags.add(
                 TtsSynthesizer.TtsBag(
                     text = segment,
-                    index = idx,
-                    utteranceId = "utt_$idx",
-                    start = r.start,
-                    end = r.end
+                    index = segIdx,
+                    utteranceId = "utt_$segIdx",
+                    start = p.start,
+                    end = p.end,
+                    originalGroupId = p.lineId,
+                    partInGroup = p.part,
+                    groupStart = p.lineStart,
+                    groupEnd = p.lineEnd
                 )
             )
         }
