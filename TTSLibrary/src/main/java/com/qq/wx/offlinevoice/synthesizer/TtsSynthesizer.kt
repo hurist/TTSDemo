@@ -31,6 +31,7 @@ import kotlin.math.min
 import kotlin.math.max
 import kotlin.math.pow
 import androidx.core.content.edit
+import kotlinx.coroutines.withTimeout
 
 /**
  * TTS 合成器主类（Actor 模型）。
@@ -182,6 +183,10 @@ class TtsSynthesizer(
     @Volatile private var mapSmoothLastSentence: Int = -1
     @Volatile private var mapSmoothFrac: Float = 0f
 
+    // —— 新增：BUFFERING 状态管理 —— //
+    private var bufferingJob: Job? = null
+    @Volatile private var bufferingSentenceIndex: Int? = null
+
     companion object {
         private const val TAG = "TtsSynthesizer"
         private val instanceCount = AtomicInteger(0)
@@ -206,8 +211,8 @@ class TtsSynthesizer(
         private const val POW_UNIT     = 0.45f  // 原 0.35：单字时长在高 speed 更快压缩
         private const val POW_INTERCEPT= 0.20f  // 保持
         private const val POW_MIN      = 0.40f  // 原 0.30：最小时长也随 speed 更明显缩短
-        private const val POW_COMMA    = 0.78f  // 原 0.60：逗号停顿在高 speed 明显缩短
-        private const val POW_PERIOD   = 0.85f  // 原 0.65：句末停顿在高 speed 明显缩短
+        private const val POW_COMMA    = 0.78f  // 原 0.60：逗号停顿在高 speed 显著缩短
+        private const val POW_PERIOD   = 0.85f  // 原 0.65：句末停顿在高 speed 显著缩短
         private const val POW_SCALE    = 0.60f  // 原 0.40：冷启动整体比例在高 speed 更快收小
 
         // 低速附加 BOOST 最大值
@@ -242,6 +247,10 @@ class TtsSynthesizer(
         private val PUNC_KERNEL = floatArrayOf(0.18f, 0.22f, 0.20f, 0.22f, 0.18f)
         private const val PUNC_EXTRA_SMALL = 0.70f
         private const val PUNC_EXTRA_BIG = 1.02f
+
+        // —— 新增：弱网下的“当前句在线超时”与 loading 防抖 —— //
+        private const val CURRENT_SENTENCE_ONLINE_TIMEOUT_MS = 10000L
+        private const val LOADING_DEBOUNCE_MS = 200L
 
         init {
             try {
@@ -386,6 +395,7 @@ class TtsSynthesizer(
         val old = sessionJob
         sessionJob = SupervisorJob()
         old?.cancel()
+        cancelBuffering()
         AppLogger.i(TAG, "创建新的 SessionScope，旧会话已取消。")
         return CoroutineScope(Dispatchers.Default + sessionJob!!)
     }
@@ -398,6 +408,7 @@ class TtsSynthesizer(
             AppLogger.d(TAG, "已有语音在播放中，将先停止当前任务再开始新的任务。")
             handleStop()
         }
+        cancelBuffering()
         isPausedByError = false
         pendingChanges.clear()
         pendingSeekIndex = null
@@ -509,7 +520,7 @@ class TtsSynthesizer(
     }
 
     private fun handlePause() {
-        if (currentState != TtsPlaybackState.PLAYING && currentState != TtsPlaybackState.PAUSED) {
+        if (currentState != TtsPlaybackState.PLAYING && currentState != TtsPlaybackState.PAUSED && currentState != TtsPlaybackState.BUFFERING) {
             AppLogger.w(TAG, "无法暂停，当前状态为 $currentState")
             return
         }
@@ -517,6 +528,7 @@ class TtsSynthesizer(
             AppLogger.d(TAG, "已经是暂停状态，无需再次操作。")
             return
         }
+        cancelBuffering()
         if (isPausedByError) AppLogger.w(TAG, "因合成失败自动暂停。") else isPausedByError = false
         audioPlayer.pause()
         updateState(TtsPlaybackState.PAUSED)
@@ -594,6 +606,7 @@ class TtsSynthesizer(
 
         // 取消旧会话作用域（集中会话守卫）
         sessionJob?.cancel()
+        cancelBuffering()
 
         isPausedByError = false
         pendingChanges.clear()
@@ -941,6 +954,7 @@ class TtsSynthesizer(
                         source = SynthesisMode.ONLINE,
                         sentenceIndex = lastIndex
                     )
+                    endBufferingIfNeeded(lastIndex)
                 }
 
                 if (isSessionActive() && coroutineContext.isActive) {
@@ -986,7 +1000,22 @@ class TtsSynthesizer(
             val start = System.currentTimeMillis()
 
             val isCoolingDown = System.currentTimeMillis() < onlineCooldownUntilTimestamp
-            val decoded = ttsRepository.getDecodedPcm(trimmed, currentSpeaker, allowNetwork = !isCoolingDown)
+
+            val strategy = strategyManager.currentStrategy
+            val shouldBuffer = (strategy == TtsStrategy.ONLINE_PREFERRED || strategy == TtsStrategy.ONLINE_ONLY) &&
+                    (index == playingSentenceIndex || index == playingSentenceIndex + 1)
+
+            if (shouldBuffer) {
+                scheduleBufferingIfNeeded(index)
+            }
+
+            val decoded = if (shouldBuffer) {
+                withTimeout(CURRENT_SENTENCE_ONLINE_TIMEOUT_MS) {
+                    ttsRepository.getDecodedPcm(trimmed, currentSpeaker, allowNetwork = !isCoolingDown)
+                }
+            } else {
+                ttsRepository.getDecodedPcm(trimmed, currentSpeaker, allowNetwork = !isCoolingDown)
+            }
 
             if (!coroutineContext.isActive || !isSessionActive()) return SynthesisResult.Deferred
 
@@ -1025,6 +1054,7 @@ class TtsSynthesizer(
                         source = SynthesisMode.ONLINE,
                         sentenceIndex = index
                     )
+                    endBufferingIfNeeded(index)
                 }
             }
 
@@ -1032,9 +1062,13 @@ class TtsSynthesizer(
                 if (isSessionActive()) sendCommand(Command.InternalSentenceEnd(index, sentence))
             }
             return SynthesisResult.Success
-        } catch (e: Exception) {
-            val code = (e as? WxApiException)?.errorCode
+        } catch (e: WxApiException) {
+            val code = e.errorCode
             val reason = "合成[在线] (句子 $index)失败: ${e.message}, code=$code"
+            AppLogger.e(TAG, reason, important = true)
+            return SynthesisResult.Failure(reason)
+        } catch (e: Exception) {
+            val reason = "合成[在线] (句子 $index)失败: ${e.message}"
             AppLogger.e(TAG, reason, important = true)
             return SynthesisResult.Failure(reason)
         }
@@ -1126,6 +1160,7 @@ class TtsSynthesizer(
                             source = SynthesisMode.OFFLINE,
                             sentenceIndex = index
                         )
+                        endBufferingIfNeeded(index)
                     }
                     delay(1)
                 }
@@ -1544,5 +1579,39 @@ class TtsSynthesizer(
         val newOverallCnt = overallCnt + 1
         countOverallByBucket[bucket] = newOverallCnt
         saveCountOverall(bucket, newOverallCnt)
+    }
+
+    // —— 新增：BUFFERING 辅助 —— //
+    private fun scheduleBufferingIfNeeded(index: Int) {
+        bufferingJob?.cancel()
+        bufferingSentenceIndex = index
+        bufferingJob = appScope.launch(Dispatchers.Default) {
+            delay(LOADING_DEBOUNCE_MS)
+            if (!isSessionActive()) return@launch
+            if (currentState == TtsPlaybackState.PLAYING && bufferingSentenceIndex == index) {
+                updateState(TtsPlaybackState.BUFFERING)
+            }
+        }
+    }
+
+    private fun endBufferingIfNeeded(index: Int) {
+        val target = bufferingSentenceIndex
+        if (target != null && target == index) {
+            bufferingJob?.cancel()
+            bufferingJob = null
+            bufferingSentenceIndex = null
+            if (currentState == TtsPlaybackState.BUFFERING) {
+                updateState(TtsPlaybackState.PLAYING)
+            }
+        }
+    }
+
+    private fun cancelBuffering() {
+        bufferingJob?.cancel()
+        bufferingJob = null
+        bufferingSentenceIndex = null
+        if (currentState == TtsPlaybackState.BUFFERING) {
+            updateState(TtsPlaybackState.PLAYING)
+        }
     }
 }

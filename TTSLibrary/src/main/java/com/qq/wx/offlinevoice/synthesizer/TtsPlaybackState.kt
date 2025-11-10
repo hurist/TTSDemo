@@ -11,5 +11,8 @@ enum class TtsPlaybackState {
     PLAYING,
     
     /** TTS播放已暂停 */
-    PAUSED
+    PAUSED,
+
+    /** TTS正在缓冲数据 */
+    BUFFERING
 }
