@@ -455,6 +455,8 @@ class TtsSynthesizer(
         lineStartPos.clear()
         lineEndPos.clear()
         totalLogicalLines = 0
+        mapSmoothLastSentence = -1
+        mapSmoothFrac = 0f
 
         val result = when (splitterStrategy) {
             SentenceSplitterStrategy.NEWLINE -> SentenceSplitter.sentenceSplitListByLine(text)
@@ -484,7 +486,8 @@ class TtsSynthesizer(
             onlineAudioProcessor?.release()
             onlineAudioProcessor = null
         }
-
+        // 关键新增：清理上一轮的内部进度与队列，避免读到“上一轮的 fraction/索引”
+        audioPlayer.resetBlocking()
         audioPlayer.startIfNeeded(volume = currentVolume)
         updateState(TtsPlaybackState.PLAYING)
         currentCallback?.onSynthesisStart()

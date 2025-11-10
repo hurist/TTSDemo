@@ -285,22 +285,22 @@ class MainActivity : AppCompatActivity() {
                     when (newState) {
                         TtsPlaybackState.IDLE -> {
                             updateStatus("空闲")
-                            binding.buttonPlay.text = "播放"
+                            binding.buttonPause.text = "继续"
                         }
 
                         TtsPlaybackState.PLAYING -> {
                             //updateStatus("播放中")
-                            binding.buttonPlay.text = "暂停"
+                            binding.buttonPause.text = "暂停"
                         }
 
                         TtsPlaybackState.PAUSED -> {
                             //updateStatus("已暂停")
-                            binding.buttonPlay.text = "继续"
+                            binding.buttonPause.text = "继续"
                         }
 
                         TtsPlaybackState.BUFFERING -> {
                             updateStatus("缓冲中")
-                            binding.buttonPlay.text = "加载中"
+                            binding.buttonPause.text = "加载中"
                         }
                     }
                 }
@@ -312,11 +312,7 @@ class MainActivity : AppCompatActivity() {
                     updateStatus("播放完成")
                 }
                 tts?.speak(
-                    """
-                    恭喜你完成了TTS演示应用的播放！
-                    你可以尝试输入不同的文本，调整语速，切换发音人，体验更多功能。
-                    感谢使用本应用，祝你有美好的一天！
-                    """.trimIndent()
+                    text
                 )
             }
 
@@ -612,5 +608,11 @@ class MainActivity : AppCompatActivity() {
         const val textLong = """
             夜色如墨，风从远方的山谷吹来，带着湿润的草香与细碎的虫鸣。林深处，一盏孤灯在微微摇曳，映出女子清冷的侧颜。她叫沈知晚，身披青色外袍，指尖轻抚那柄泛着寒光的长剑，剑名“归霜”，是她师父临终前所赠。十年之前，她还是个无忧的少女，笑起来眼角微弯，如新月照水。十年之后，她早已学会了在笑容下隐藏悲意。她踏入这片森林，是为追查一桩旧案——“无相门”的覆灭。传言那夜血流成河，满城皆火，而唯一逃出的她，却忘了是谁推她一掌，从火海中送出。风越刮越烈，枯叶在脚边旋转，她忽然听见一阵低沉的笛声，从林子深处传来，曲调古怪，似悲似喜。她心头一紧，脚步顿住。那笛声她一生都忘不掉，正是那位“无相门”叛徒——顾辞。她缓缓拔剑，寒气与月光交织，落在她眼底如霜。脚下的土地忽然微颤，一阵气浪袭来，一道黑影掠出，带着残破的斗篷与熟悉的气息。顾辞站在她面前，目光淡漠，声音低哑：“十年了，你终于来了。”沈知晚握剑的手微微发颤，却仍挺直脊背，声音冷得像雪：“我来，是为了问你一句——那一夜，你为何救我？”顾辞沉默良久，风吹起他衣角的尘土，月光落在他脸上，那张被岁月刻出深痕的面庞忽然露出一抹苦笑：“因为……那一夜，所有人都该死，除了你。”
         """
+
+         val textEnd = """
+              恭喜你完成了TTS演示应用的播放！
+                    你可以尝试输入不同的文本，调整语速，切换发音人，体验更多功能。
+                    感谢使用本应用，祝你有美好的一天！
+        """.trimIndent()
     }
 }
