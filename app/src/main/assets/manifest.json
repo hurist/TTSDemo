@@ -1,0 +1,16 @@
+{
+  "common/Conv1.dat": "305e0401bec4b35e3163eb92401f703c9531cebf1e6ffc2a9c059fe35461d3bf",
+  "common/Conv2.dat": "1d62ff4aff3f5d203e4738675d9d7fc7070905fc6ab27e6f2d703a980aa7d87b",
+  "common/EnText.dat": "bc0f4b6e00ad03728199e3edf6598acc04dfefe902c45a9d3a6bb9fa6dfdc634",
+  "common/acronyms.txt": "3982f5040909f2c0d43941a2ed0fe64b68e45705efb6d5febf357a52b144e063",
+  "common/frozen.bin": "bee0ec9a570d2c6cc074a6866cc69eee35158ab9b72cd04ff115238541c00bf3",
+  "common/frozenP3.bin": "e3875fc58ff946cc8c29fd34e4ba9dfa38439137427a6fe9131d48242bece0e2",
+  "common/polyphoneModels.bin": "9f1c95a303d82036fb64f2d0fa5c7ffd0da3be4cb801ba2c388fd3ae8aea5217",
+  "common/polyphoneRules.txt": "a16293001db895f9c48b0ca88e89431d46f0f0955f6ec6c6e358bf651d3b6f14",
+  "common/polyphones.txt": "5aee402371e862aa6693a819b8cdeccb47f64f857dbe2a92fc72e2b0e4f57ab4",
+  "common/quant.w2v.bin": "7311a2e180535a72f7b80c663e7525eb57901e64079b9bb2b10bd7b793362ae2",
+  "common/word_data.dat": "a5d9f353d54cbab6b04ff02540d7ee92da64957be1b7414fa444b4957b1f9c4f",
+  "voices/config.json": "c93dc59f31bdd8d7fb2f2c05d019b002524cbc0d5b985e431e62e46400833ce7",
+  "voices/dtn.bin": "6d3466727d03bdb5528943f04e4a2f1cf131d19f039986c54be427ec547f7c77",
+  "voices/maleen.bin": "3a8f004925294a3c81bacc1857bc8559d273ca4084a4b98aef063bc2bdecffde"
+}
