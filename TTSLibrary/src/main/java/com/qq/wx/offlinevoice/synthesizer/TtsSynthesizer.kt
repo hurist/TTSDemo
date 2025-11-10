@@ -250,7 +250,7 @@ class TtsSynthesizer(
 
         // —— 新增：弱网下的“当前句在线超时”与 loading 防抖 —— //
         private const val CURRENT_SENTENCE_ONLINE_TIMEOUT_MS = 10000L
-        private const val LOADING_DEBOUNCE_MS = 200L
+        private const val LOADING_DEBOUNCE_MS = 250L
 
         init {
             try {
