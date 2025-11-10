@@ -1,11 +1,17 @@
 package com.qq.wx.offlinevoice.synthesizer
 
 import android.content.Context
+import java.io.File
 import java.nio.charset.StandardCharsets
 
 
 
 object PathUtils {
+
+    fun checkVoiceResourceExists(context: Context, modeName: String): Boolean {
+        val targetFile = File(getVoicePath(context)).resolve("voices").resolve("${modeName}.bin")
+        return targetFile.exists()
+    }
 
     fun getVoicePath(context: Context): String {
         val pathBuilder = StringBuilder()

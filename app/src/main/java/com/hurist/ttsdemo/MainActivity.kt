@@ -16,6 +16,7 @@ import android.widget.EditText
 import android.widget.SeekBar
 import android.widget.Spinner
 import android.widget.TextView
+import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
@@ -37,6 +38,7 @@ import java.io.IOException
 import androidx.core.content.edit
 import com.hurist.ttsdemo.databinding.ActivityMainBinding
 import com.qq.wx.offlinevoice.synthesizer.AppLogger
+import com.qq.wx.offlinevoice.synthesizer.PathUtils
 
 /**
  * 主Activity - TTS演示应用
@@ -65,12 +67,12 @@ class MainActivity : AppCompatActivity() {
         Speaker(modelName = "tts_valle_m468_19_0718", isMale = true),
         Speaker(modelName = "tts_valle_caiyu515", isMale = false),
         Speaker(modelName = "tts_valle_10373_f561_0619", isMale = false),
-        Speaker(modelName = "chensheng256_vitsb_cn", isMale = true),
+        /*Speaker(modelName = "chensheng256_vitsb_cn", isMale = true),
         Speaker(modelName = "zhaoyun256_vitsb_cn", isMale = false),
         Speaker(modelName = "talkmale", isMale = true),
         Speaker(modelName = "female3", isMale = false),
         Speaker(modelName = "pdb", isMale = true),
-        Speaker(modelName = "male3", isMale = true)
+        Speaker(modelName = "male3", isMale = true)*/
     )
 
     // 可用的发音人列表
@@ -118,7 +120,8 @@ class MainActivity : AppCompatActivity() {
         // 异步加载语音数据
         lifecycleScope.launch(Dispatchers.IO) {
             // 从assets复制语音数据文件
-            copyAssetsToWeReadVoiceDir(this@MainActivity)
+            //copyAssetsToWeReadVoiceDir(this@MainActivity)
+            AssetUnpacker.ensureResourcesAreReady(this@MainActivity)
 
             withContext(Dispatchers.Main) {
                 // 初始化TTS引擎
@@ -168,9 +171,18 @@ class MainActivity : AppCompatActivity() {
             ) {
                 currentVoice = speakers[position]
                 Log.d(TAG, "选择发音人: $currentVoice")
-
-                // 动态修改发音人
-                tts?.setVoice(currentVoice)
+                if (PathUtils.checkVoiceResourceExists(context = this@MainActivity, currentVoice.offlineModelName)) {
+                    // 动态修改发音人
+                    tts?.setVoice(currentVoice)
+                } else {
+                    tts?.stop()
+                    updateStatus("语音数据文件缺失: ${currentVoice.offlineModelName}")
+                    Toast.makeText(
+                        this@MainActivity,
+                        "语音数据文件缺失: ${currentVoice.offlineModelName}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
             }
 
             override fun onNothingSelected(parent: AdapterView<*>?) {}
@@ -409,8 +421,8 @@ class MainActivity : AppCompatActivity() {
      * 从assets复制语音数据文件到外部存储
      */
     private fun copyAssetsToWeReadVoiceDir(context: Context) {
-        val destDir = File(context.getExternalFilesDir(null), "voice/weread")
-        copyAssetFolder(context, "", destDir.absolutePath)
+        val destDir = PathUtils.getVoicePath(context)
+        copyAssetFolder(context, "", destDir)
     }
 
     /**
