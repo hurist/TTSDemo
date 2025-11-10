@@ -187,7 +187,7 @@ class TtsSynthesizer(
     private val sourcePerSentence = mutableMapOf<Int, SynthesisMode>()
     private val boostedPredictedSentences = mutableSetOf<Int>()
 
-    // —— 新增：仅用于“字符进度映射”的分数平滑状态（不影响播放器与日志） —— //
+    // —— 新增：仅用于“字符进度回调映射”的分数平滑状态（不影响播放器与日志） —— //
     @Volatile private var mapSmoothLastSentence: Int = -1
     @Volatile private var mapSmoothFrac: Float = 0f
 
@@ -1267,8 +1267,9 @@ class TtsSynthesizer(
                     val charCount = fullLineText.length
                     if (charCount > 0) {
                         val rawFrac = progress.fraction.coerceIn(0f, 1f)
-                        val frac = if (lineId != mapSmoothLastSentence) {
-                            mapSmoothLastSentence = lineId
+                        // 物理段切换时重置平滑状态
+                        val frac = if (segmentIdx != mapSmoothLastSentence) {
+                            mapSmoothLastSentence = segmentIdx
                             mapSmoothFrac = rawFrac
                             rawFrac
                         } else {
