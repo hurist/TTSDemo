@@ -17,4 +17,10 @@ enum class Speaker(
     fun isResourceAvailable(context: Context): Boolean {
         return PathUtils.checkVoiceResourceExists(context, offlineModelName)
     }
+
+    companion object {
+        fun fromModelName(name: String?): Speaker? {
+            return entries.firstOrNull { it.modelName == name }
+        }
+    }
 }
