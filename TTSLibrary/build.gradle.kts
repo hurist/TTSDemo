@@ -33,6 +33,9 @@ android {
     kotlinOptions {
         jvmTarget = "11"
     }
+    sourceSets["main"].jniLibs.srcDir("libs")
+
+
 }
 
 dependencies {
