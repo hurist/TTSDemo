@@ -8,7 +8,7 @@ interface TtsCallback {
      * TTS引擎初始化完成时调用
      * @param success 如果初始化成功则为true
      */
-    fun onInitialized(success: Boolean) {}
+    fun onInitialized(success: Boolean)
     
     /**
      * 整体TTS合成开始时调用（针对所有句子）
@@ -24,7 +24,7 @@ interface TtsCallback {
      * @param startPos 句子在整体文本中的起始位置
      * @param endPos 句子在整体文本中的结束位置
      */
-    fun onSentenceStart(sentenceIndex: Int, sentence: String, totalSentences: Int, mode: SynthesisMode, startPos: Int, endPos: Int) {}
+    fun onSentenceStart(sentenceIndex: Int, sentence: String, totalSentences: Int, mode: SynthesisMode, startPos: Int, endPos: Int)
 
 
     /**
@@ -36,7 +36,7 @@ interface TtsCallback {
      * @param startPos 句子在整体文本中的起始位置
      * @param endPos 句子在整体文本中的结束位置
      */
-    fun onSentenceProgressChanged(sentenceIndex: Int, sentence: String, progress: Int, char: String, startPos: Int, endPos: Int) {}
+    fun onSentenceProgressChanged(sentenceIndex: Int, sentence: String, progress: Int, char: String, startPos: Int, endPos: Int)
     
     /**
      * 特定句子完成朗读时调用
@@ -49,13 +49,13 @@ interface TtsCallback {
      * 播放状态变化时调用
      * @param newState 新的播放状态
      */
-    fun onStateChanged(newState: TtsPlaybackState) {}
+    fun onStateChanged(newState: TtsPlaybackState)
 
     
     /**
      * 所有句子都已成功朗读时调用
      */
-    fun onSynthesisComplete() {}
+    fun onSynthesisComplete()
     
     /**
      * 播放暂停时调用

@@ -62,18 +62,20 @@ class MainActivity : AppCompatActivity() {
     }
 
 
-    private val speakers = listOf(
+    /*private val speakers = listOf(
         Speaker(modelName = "tts_valle", isMale = true),
         Speaker(modelName = "tts_valle_m468_19_0718", isMale = true),
         Speaker(modelName = "tts_valle_caiyu515", isMale = false),
         Speaker(modelName = "tts_valle_10373_f561_0619", isMale = false),
-        /*Speaker(modelName = "chensheng256_vitsb_cn", isMale = true),
+        *//*Speaker(modelName = "chensheng256_vitsb_cn", isMale = true),
         Speaker(modelName = "zhaoyun256_vitsb_cn", isMale = false),
         Speaker(modelName = "talkmale", isMale = true),
         Speaker(modelName = "female3", isMale = false),
         Speaker(modelName = "pdb", isMale = true),
-        Speaker(modelName = "male3", isMale = true)*/
-    )
+        Speaker(modelName = "male3", isMale = true)*//*
+    )*/
+
+    private val speakers = Speaker.entries
 
     // 可用的发音人列表
     private val availableVoices = listOf(
