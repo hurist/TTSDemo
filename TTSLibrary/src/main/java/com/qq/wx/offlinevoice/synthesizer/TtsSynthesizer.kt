@@ -71,7 +71,7 @@ class TtsSynthesizer(
     }
 
     private sealed class Command {
-        data class Speak(val text: String) : Command()
+        data class Speak(val text: String, val beginPos: Int = 0) : Command()
         data class SetSpeed(val speed: Float) : Command()
         data class SetVolume(val volume: Float) : Command()
         data class SetVoice(val speaker: Speaker) : Command()
@@ -310,7 +310,7 @@ class TtsSynthesizer(
     fun setSpeed(speed: Float) = sendCommand(Command.SetSpeed(speed))
     fun setVolume(volume: Float) = sendCommand(Command.SetVolume(volume))
     fun setVoice(speaker: Speaker) = sendCommand(Command.SetVoice(speaker))
-    fun speak(text: String) = sendCommand(Command.Speak(text))
+    fun speak(text: String, beginPos: Int = 0) = sendCommand(Command.Speak(text, beginPos))
     fun pause() = sendCommand(Command.Pause)
     fun resume() = sendCommand(Command.Resume)
     fun stop() = sendCommand(Command.Stop)
@@ -339,7 +339,7 @@ class TtsSynthesizer(
     private suspend fun commandProcessor() {
         for (command in commandChannel) {
             when (command) {
-                is Command.Speak -> handleSpeak(command.text)
+                is Command.Speak -> handleSpeak(command.text, command.beginPos)
                 is Command.SetSpeed -> handleSetSpeed(command.speed)
                 is Command.SetVolume -> handleSetVolume(command.volume)
                 is Command.SetVoice -> handleSetSpeaker(command.speaker)
@@ -426,7 +426,7 @@ class TtsSynthesizer(
     private fun isSessionActive(): Boolean = sessionJob?.isActive == true
 
     // ============ 命令实现 ============
-    private suspend fun handleSpeak(text: String) {
+    private suspend fun handleSpeak(text: String, beginPos: Int = 0) {
         if (currentState == TtsPlaybackState.PLAYING || currentState == TtsPlaybackState.PAUSED) {
             AppLogger.d(TAG, "已有语音在播放中，将先停止当前任务再开始新的任务。")
             handleStop()
@@ -472,6 +472,18 @@ class TtsSynthesizer(
 
         playingSentenceIndex = 0
         synthesisSentenceIndex = 0
+
+        if (beginPos > 0) {
+            // 定位到指定的开始位置对应的句子
+            val targetIndex = sentences.indexOfFirst { it.start >= beginPos }
+            if (targetIndex != -1) {
+                playingSentenceIndex = targetIndex
+                synthesisSentenceIndex = targetIndex
+                AppLogger.i(TAG, "speak: 定位到指定的 beginPos=$beginPos 对应的句子索引 $targetIndex")
+            } else {
+                AppLogger.w(TAG, "speak: 提供的 beginPos=$beginPos 超出文本范围，忽略该参数。")
+            }
+        }
 
         processorMutex.withLock {
             onlineAudioProcessor?.release()

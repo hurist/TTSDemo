@@ -138,7 +138,7 @@ class MainActivity : AppCompatActivity() {
         binding.uidInput.setText(uid.toString())
 
         // 设置默认文本
-        binding.editTextInput.setText(textLong)
+        binding.editTextInput.setText(text)
 
         // 设置语速滑动条 (0.5x到3.0x，步进0.1，默认1.0x)
         // SeekBar范围: 0-25，映射到0.5-3.0
@@ -200,7 +200,7 @@ class MainActivity : AppCompatActivity() {
 
 
             if (text.isNotEmpty()) {
-                tts?.speak(text)
+                tts?.speak(text, 0)
             } else {
                 updateStatus("请输入要播放的文本")
             }
