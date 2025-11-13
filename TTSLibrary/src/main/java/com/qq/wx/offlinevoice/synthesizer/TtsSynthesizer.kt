@@ -450,7 +450,7 @@ class TtsSynthesizer(
         mapSmoothFrac = 0f
 
         val result = when (splitterStrategy) {
-            SentenceSplitterStrategy.NEWLINE -> SentenceSplitter.sentenceSplitListByLine(text)
+            SentenceSplitterStrategy.NEWLINE -> SentenceSplitter.sentenceSplitListByLine(text, beginPos)
             SentenceSplitterStrategy.PUNCTUATION -> SentenceSplitter.sentenceSplitList(text)
         }
         if (result.isEmpty()) {

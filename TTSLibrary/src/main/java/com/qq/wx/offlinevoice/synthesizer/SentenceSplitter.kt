@@ -125,8 +125,13 @@ object SentenceSplitter {
      * 先按换行分割，再对每行应用“最多 250 字”的切分规则，返回物理段列表（TtsBag）。
      * 超长行拆分：从 250 处向前寻找最近标点（句末/停顿/分隔），若找到则切在标点之后；否则硬切 250。
      * 所有分段保留行元数据 originalGroupId / partInGroup / groupStart / groupEnd。
+     *
+     * 新增：beginPos (可选)
+     * 若 beginPos 位于最终某一分段的内部 (start < beginPos < end)，则将该分段在 beginPos 处分裂为两段：
+     *   左段 [start, beginPos)，右段 [beginPos, end)
+     * “标点归右”自然满足（标点字符位于 beginPos 位置时落入右段）。
      */
-    fun sentenceSplitListByLine(text: String): List<TtsSynthesizer.TtsBag> {
+    fun sentenceSplitListByLine(text: String, beginPos: Int? = null): List<TtsSynthesizer.TtsBag> {
         val MAX_LEN = 150
         val lineRanges = toSplit(listOf(BagRange(0, text.length, 0, false)), text, RegexConfig.LineBreak)
 
@@ -160,6 +165,33 @@ object SentenceSplitter {
             }
             if (curStart < lineEnd) {
                 pieces += Piece(curStart, lineEnd, lineIdx, part, r.start, r.end)
+            }
+        }
+
+        // beginPos 二次拆分（后处理）
+        if (beginPos != null && beginPos > 0 && beginPos < text.length) {
+            val targetIndex = pieces.indexOfFirst { it.start < beginPos && beginPos < it.end }
+            if (targetIndex >= 0) {
+                val target = pieces[targetIndex]
+                // 拆分为两段，标点归右：左段不包含 beginPos 位置字符
+                val left = Piece(target.start, beginPos, target.lineId, target.part, target.lineStart, target.lineEnd)
+                val right = Piece(beginPos, target.end, target.lineId, target.part + 1, target.lineStart, target.lineEnd)
+
+                // 替换原目标段
+                pieces.removeAt(targetIndex)
+                pieces.add(targetIndex, right)
+                pieces.add(targetIndex, left)
+
+                // 重新计算该行内的 part 序号（保持从 0 递增）
+                val lineId = target.lineId
+                var p = 0
+                for (i in pieces.indices) {
+                    val piece = pieces[i]
+                    if (piece.lineId == lineId) {
+                        pieces[i] = piece.copy(part = p)
+                        p++
+                    }
+                }
             }
         }
 
