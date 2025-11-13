@@ -475,7 +475,7 @@ class TtsSynthesizer(
 
         if (beginPos > 0) {
             // 定位到指定的开始位置对应的句子
-            val targetIndex = sentences.indexOfFirst { it.start >= beginPos && it.partInGroup == 0 }
+            val targetIndex = sentences.indexOfFirst { it.start >= beginPos }
             if (targetIndex != -1) {
                 playingSentenceIndex = targetIndex
                 synthesisSentenceIndex = targetIndex
