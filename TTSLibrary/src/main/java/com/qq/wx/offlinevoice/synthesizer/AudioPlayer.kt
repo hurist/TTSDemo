@@ -303,15 +303,16 @@ class AudioPlayer(
 
                 // 3) 正常消费：select 监听控制与 PCM/Marker
                 select<Unit> {
-                    controlChannel.onReceive { control ->
-                        processControlCommand(control)
+                    controlChannel.onReceiveCatching { result ->
+                        result.getOrNull()?.let { control ->  processControlCommand(control) }
                     }
-                    pcmChannel.onReceive { item ->
+                    pcmChannel.onReceiveCatching { result ->
+                        val item = result.getOrNull() ?: return@onReceiveCatching
                         if (item.gen != generation) {
                             AppLogger.v(TAG, "丢弃旧代次(${item.gen})的数据，当前代次为 $generation")
-                            return@onReceive
+                            return@onReceiveCatching
                         }
-                        if (!isActive || isStopped || item.gen != generation) return@onReceive
+                        if (!isActive || isStopped || item.gen != generation) return@onReceiveCatching
 
                         when (item) {
                             is QueueItem.Pcm -> {
@@ -319,13 +320,13 @@ class AudioPlayer(
                                 if (protectionActive && item.sentenceIndex != protectedSentenceIndex) {
                                     if (item.source == SynthesisMode.OFFLINE) {
                                         AppLogger.i(TAG, "保护期丢弃离线PCM：句子#${item.sentenceIndex} (受保护句为#${protectedSentenceIndex})")
-                                        return@onReceive
+                                        return@onReceiveCatching
                                     } else {
                                         val bucket = deferredOnline.getOrPut(item.sentenceIndex) { DeferredBucket(item.sentenceIndex) }
                                         bucket.items.add(item)
                                         bucket.hasPcm = true
                                         AppLogger.i(TAG, "保护期暂存在线PCM：句子#${item.sentenceIndex}，bucket(hasPcm=${bucket.hasPcm}) size=${bucket.items.size}")
-                                        return@onReceive
+                                        return@onReceiveCatching
                                     }
                                 }
 
@@ -352,14 +353,14 @@ class AudioPlayer(
                                 if (protectionActive && item.sentenceIndex != protectedSentenceIndex) {
                                     if (item.source == SynthesisMode.OFFLINE) {
                                         AppLogger.i(TAG, "保护期丢弃离线Marker：句子#${item.sentenceIndex} type=${item.type}")
-                                        return@onReceive
+                                        return@onReceiveCatching
                                     } else {
                                         val bucket = deferredOnline.getOrPut(item.sentenceIndex) { DeferredBucket(item.sentenceIndex) }
                                         bucket.items.add(item)
                                         if (item.type == MarkerType.SENTENCE_START) bucket.hasStart = true
                                         if (item.type == MarkerType.SENTENCE_END) bucket.hasEnd = true
                                         AppLogger.i(TAG, "保护期暂存在线Marker：句子#${item.sentenceIndex} type=${item.type}，bucket(hasPcm=${bucket.hasPcm}, start=${bucket.hasStart}, end=${bucket.hasEnd})")
-                                        return@onReceive
+                                        return@onReceiveCatching
                                     }
                                 }
 
