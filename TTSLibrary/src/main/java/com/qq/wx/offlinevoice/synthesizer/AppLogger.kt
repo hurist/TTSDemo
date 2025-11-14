@@ -64,35 +64,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * 进程退出时（可选但推荐）
  *   AppLogger.shutdown() // flush 并释放 writer
  */
-object AppLogger {
+internal object AppLogger {
 
-    interface Callback {
-        fun onLogWritten(level: Level, tag: String, msg: String)
-    }
-
-    // ---------------- 配置与级别 ----------------
-    enum class Level(val priority: Int) {
-        VERBOSE(2),
-        DEBUG(3),
-        INFO(4),
-        WARN(5),
-        ERROR(6),
-        WTF(7),
-        NONE(99); // NONE 表示完全不输出
-    }
-
-    data class Config(
-        val enableConsole: Boolean = true,
-        val enableFile: Boolean = true,
-        val minLevel: Level = Level.DEBUG,
-        val logDir: File? = null, // 默认 context.filesDir/logs
-        val tagPrefix: String = "TTSLib",
-        val includeThread: Boolean = true,
-        val includeProcessId: Boolean = false,
-        val timeFormat: String = "yyyy-MM-dd HH:mm:ss.SSS",
-        val fileChannelCapacity: Int = 2048, // 文件写入通道容量，过大可能占用内存，过小可能丢日志
-        val autoHookUncaughtException: Boolean = true // 可选：自动捕获未处理异常并落盘
-    )
 
 
     @Volatile
@@ -112,7 +85,7 @@ object AppLogger {
     @Volatile
     private var includeProcessId: Boolean = false
 
-    private var callback: Callback? = null
+    private var callback: AppLoggerCallback? = null
 
     private val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US)
     private fun formatNow(fmt: String? = null): String {
@@ -139,12 +112,12 @@ object AppLogger {
 
     // ---------------- 初始化 / 销毁 ----------------
 
-    fun setCallback(cb: Callback?) {
+    fun setCallback(cb: AppLoggerCallback?) {
         callback = cb
     }
 
     @Synchronized
-    fun initialize(context: Context, config: Config = Config()) {
+    fun initialize(context: Context, config: AppLoggerConfig = AppLoggerConfig()) {
         if (initialized) return
 
         enabled = true
@@ -402,4 +375,32 @@ object AppLogger {
             "获取异常栈失败: ${e.message}"
         }
     }
+}
+
+data class AppLoggerConfig(
+    val enableConsole: Boolean = true,
+    val enableFile: Boolean = true,
+    val minLevel: Level = Level.DEBUG,
+    val logDir: File? = null, // 默认 context.filesDir/logs
+    val tagPrefix: String = "TTSLib",
+    val includeThread: Boolean = true,
+    val includeProcessId: Boolean = false,
+    val timeFormat: String = "yyyy-MM-dd HH:mm:ss.SSS",
+    val fileChannelCapacity: Int = 2048, // 文件写入通道容量，过大可能占用内存，过小可能丢日志
+    val autoHookUncaughtException: Boolean = true // 可选：自动捕获未处理异常并落盘
+)
+
+// ---------------- 配置与级别 ----------------
+enum class Level(val priority: Int) {
+    VERBOSE(2),
+    DEBUG(3),
+    INFO(4),
+    WARN(5),
+    ERROR(6),
+    WTF(7),
+    NONE(99); // NONE 表示完全不输出
+}
+
+interface AppLoggerCallback {
+    fun onLogWritten(level: Level, tag: String, msg: String)
 }

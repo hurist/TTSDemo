@@ -37,7 +37,7 @@ import java.io.File
 import java.io.IOException
 import androidx.core.content.edit
 import com.hurist.ttsdemo.databinding.ActivityMainBinding
-import com.qq.wx.offlinevoice.synthesizer.AppLogger
+import com.qq.wx.offlinevoice.synthesizer.Level
 import com.qq.wx.offlinevoice.synthesizer.PathUtils
 import com.qq.wx.offlinevoice.synthesizer.online.WxTokenManager
 
@@ -347,7 +347,7 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            override fun onLog(level: AppLogger.Level, logMessage: String) {
+            override fun onLog(level: Level, logMessage: String) {
                 runOnUiThread {
                     binding.logRecyclerView.addLog(level, logMessage)
                 }

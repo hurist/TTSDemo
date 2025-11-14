@@ -78,5 +78,5 @@ interface TtsCallback {
      * @param logMessage 日志内容
      * @param level 日志级别
      */
-    fun onLog(level: AppLogger.Level, logMessage: String) {}
+    fun onLog(level: Level, logMessage: String) {}
 }

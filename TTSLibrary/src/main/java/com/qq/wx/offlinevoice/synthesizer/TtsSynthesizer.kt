@@ -92,9 +92,9 @@ class TtsSynthesizer(
 
     init {
         AppLogger.initialize(context)
-        AppLogger.setCallback(object : AppLogger.Callback {
+        AppLogger.setCallback(object : AppLoggerCallback {
             override fun onLogWritten(
-                level: AppLogger.Level,
+                level: Level,
                 tag: String,
                 msg: String
             ) {
@@ -277,6 +277,10 @@ class TtsSynthesizer(
                 System.loadLibrary("hwTTS")
                 System.loadLibrary("weread-tts")
             } catch (_: UnsatisfiedLinkError) { }
+        }
+
+        fun initLogger(context: Context, config: AppLoggerConfig = AppLoggerConfig()) {
+            AppLogger.initialize(context, config)
         }
     }
 

@@ -8,7 +8,7 @@ import android.view.ViewGroup
 import android.widget.TextView
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
-import com.qq.wx.offlinevoice.synthesizer.AppLogger
+import com.qq.wx.offlinevoice.synthesizer.Level
 
 /**
  * 一个高性能的日志显示控件，基于 RecyclerView 实现。
@@ -63,7 +63,7 @@ class LogRecyclerView @JvmOverloads constructor(
     /**
      * 公开方法：向日志视图添加一条新日志。
      */
-    fun addLog(level: AppLogger.Level, message: String) {
+    fun addLog(level: Level, message: String) {
         post {
             logAdapter.addLog(Log(level, message))
             if (isAutoScrollEnabled) {
@@ -101,13 +101,13 @@ class LogRecyclerView @JvmOverloads constructor(
 
         private val logs = mutableListOf<Log>()
         private val colorMap = mapOf(
-            AppLogger.Level.VERBOSE to 0xFF888888.toInt(), // 灰 - 次要信息
-            AppLogger.Level.DEBUG to 0xFF4CAF50.toInt(),   // 绿 - 调试信息
-            AppLogger.Level.INFO to 0xFF2196F3.toInt(),    // 蓝 - 正常信息
-            AppLogger.Level.WARN to 0xFFFFC107.toInt(),    // 黄 - 警告
-            AppLogger.Level.ERROR to 0xFFF44336.toInt(),   // 红 - 错误
-            AppLogger.Level.WTF to 0xFFE91E63.toInt(),     // 品红 - 致命错误
-            AppLogger.Level.NONE to 0xFF000000.toInt()     // 黑 - 默认
+            Level.VERBOSE to 0xFF888888.toInt(), // 灰 - 次要信息
+            Level.DEBUG to 0xFF4CAF50.toInt(),   // 绿 - 调试信息
+            Level.INFO to 0xFF2196F3.toInt(),    // 蓝 - 正常信息
+            Level.WARN to 0xFFFFC107.toInt(),    // 黄 - 警告
+            Level.ERROR to 0xFFF44336.toInt(),   // 红 - 错误
+            Level.WTF to 0xFFE91E63.toInt(),     // 品红 - 致命错误
+            Level.NONE to 0xFF000000.toInt()     // 黑 - 默认
         )
 
         override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): LogViewHolder {
@@ -148,7 +148,7 @@ class LogRecyclerView @JvmOverloads constructor(
     }
 
     data class Log(
-        val level: AppLogger.Level,
+        val level: Level,
         val message: String
     )
 }
