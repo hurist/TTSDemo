@@ -5,17 +5,12 @@ import android.graphics.Color
 import android.os.Bundle
 import android.text.SpannableString
 import android.text.Spanned
-import android.text.SpannedString
 import android.text.style.ForegroundColorSpan
 import android.util.Log
 import android.view.View
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
-import android.widget.Button
-import android.widget.EditText
 import android.widget.SeekBar
-import android.widget.Spinner
-import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.enableEdgeToEdge
 import androidx.appcompat.app.AppCompatActivity
@@ -29,13 +24,10 @@ import com.qq.wx.offlinevoice.synthesizer.TtsCallback
 import com.qq.wx.offlinevoice.synthesizer.TtsPlaybackState
 import com.qq.wx.offlinevoice.synthesizer.TtsSynthesizer
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.launchIn
-import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
-import androidx.core.content.edit
 import com.hurist.ttsdemo.databinding.ActivityMainBinding
 import com.qq.wx.offlinevoice.synthesizer.Level
 import com.qq.wx.offlinevoice.synthesizer.PathUtils
@@ -425,7 +417,7 @@ class MainActivity : AppCompatActivity() {
      * 从assets复制语音数据文件到外部存储
      */
     private fun copyAssetsToWeReadVoiceDir(context: Context) {
-        val destDir = PathUtils.getVoicePath(context)
+        val destDir = PathUtils.getTtsResourcePath(context)
         copyAssetFolder(context, "", destDir)
     }
 

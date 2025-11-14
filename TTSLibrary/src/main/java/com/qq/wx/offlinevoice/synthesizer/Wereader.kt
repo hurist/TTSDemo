@@ -9,11 +9,20 @@ import java.nio.charset.StandardCharsets
 object PathUtils {
 
     fun checkVoiceResourceExists(context: Context, modeName: String): Boolean {
-        val targetFile = File(getVoicePath(context)).resolve("voices").resolve("${modeName}.bin")
+        val targetFile = File(getTtsResourcePath(context)).resolve("voices").resolve("${modeName}.bin")
         return targetFile.exists()
     }
 
-    fun getVoicePath(context: Context): String {
+    fun getVoiceResourceDir(context: Context): String {
+        val path = getTtsResourcePath(context)
+        val voiceDir = File(path).resolve("voices")
+        if (!voiceDir.exists()) {
+            voiceDir.mkdirs()
+        }
+        return voiceDir.absolutePath
+    }
+
+    fun getTtsResourcePath(context: Context): String {
         val pathBuilder = StringBuilder()
         appendExternalVoicePath(
             byteArrayOf(68, 111, 42, 100, -19),
@@ -30,7 +39,7 @@ object PathUtils {
     /**
      * 将解码后的文件夹名追加到 StringBuilder 中，返回外部存储路径
      */
-    fun appendExternalVoicePath(key: ByteArray, salt: ByteArray, context: Context, sb: StringBuilder) {
+    private fun appendExternalVoicePath(key: ByteArray, salt: ByteArray, context: Context, sb: StringBuilder) {
         val folderName = XorDecoder.decode(key, salt)
         val path = if (BuildConfig.DEBUG) {
             context.getExternalFilesDir(folderName)?.absolutePath
@@ -43,7 +52,7 @@ object PathUtils {
     /**
      * 将解码后的字符串追加到 StringBuilder 并返回完整字符串
      */
-    fun appendDecodedString(key: ByteArray, salt: ByteArray, sb: StringBuilder): String {
+    private fun appendDecodedString(key: ByteArray, salt: ByteArray, sb: StringBuilder): String {
         sb.append(XorDecoder.decode(key, salt))
         return sb.toString()
     }

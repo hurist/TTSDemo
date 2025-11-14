@@ -2,7 +2,6 @@ package com.qq.wx.offlinevoice.synthesizer
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.util.Log
 import android.widget.Toast
 import com.qq.wx.offlinevoice.synthesizer.cache.TtsCacheImpl
 import com.qq.wx.offlinevoice.synthesizer.online.MediaCodecMp3Decoder
@@ -28,7 +27,6 @@ import kotlinx.coroutines.sync.withLock
 import kotlin.coroutines.coroutineContext
 import kotlin.properties.Delegates
 import kotlin.math.min
-import kotlin.math.max
 import kotlin.math.pow
 import androidx.core.content.edit
 import kotlinx.coroutines.withTimeout
@@ -285,7 +283,7 @@ class TtsSynthesizer(
     }
 
     init {
-        voiceDataPath = PathUtils.getVoicePath(context)
+        voiceDataPath = PathUtils.getTtsResourcePath(context)
 
         strategyManager = SynthesisStrategyManager(networkMonitor)
         val onlineApi = WxReaderApi(context)

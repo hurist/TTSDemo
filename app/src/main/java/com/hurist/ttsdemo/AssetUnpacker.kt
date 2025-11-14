@@ -8,7 +8,6 @@ import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
-import java.io.IOException
 import java.security.MessageDigest
 import java.util.zip.ZipInputStream
 
@@ -33,7 +32,7 @@ object AssetUnpacker {
      * @return 如果资源准备就绪则返回 true，如果发生不可恢复的错误则返回 false。
      */
     suspend fun ensureResourcesAreReady(context: Context): Boolean = withContext(Dispatchers.IO) {
-        TARGET_DIR_NAME = PathUtils.getVoicePath(context)
+        TARGET_DIR_NAME = PathUtils.getTtsResourcePath(context)
         val targetDir = File(TARGET_DIR_NAME)
 
         if (!targetDir.exists()) {
