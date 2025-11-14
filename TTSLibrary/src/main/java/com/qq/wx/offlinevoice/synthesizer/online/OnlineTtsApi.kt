@@ -10,5 +10,5 @@ interface OnlineTtsApi {
      */
     suspend fun fetchTtsAudio(text: String, speaker: Speaker): ByteArray
 
-    fun setToken(token: String, uid: Int)
+    fun setToken(token: String, uid: Long)
 }

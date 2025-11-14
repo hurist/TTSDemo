@@ -322,7 +322,7 @@ class TtsSynthesizer(
      */
     fun seekToSentence(index: Int) = sendCommand(Command.SeekTo(index)) // index 按“逻辑行”语义
 
-    fun setToken(token: String, uid: Int) {
+    fun setToken(token: String, uid: Long) {
         ttsRepository.onlineApi.setToken(token, uid)
     }
 

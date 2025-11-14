@@ -39,6 +39,7 @@ import androidx.core.content.edit
 import com.hurist.ttsdemo.databinding.ActivityMainBinding
 import com.qq.wx.offlinevoice.synthesizer.AppLogger
 import com.qq.wx.offlinevoice.synthesizer.PathUtils
+import com.qq.wx.offlinevoice.synthesizer.online.WxTokenManager
 
 /**
  * 主Activity - TTS演示应用
@@ -91,8 +92,8 @@ class MainActivity : AppCompatActivity() {
     )
     private var currentVoice: Speaker = speakers[0]
 
-    private var token = "OMtRTNxo5Buk/PAl0ZjHde5Vg5TdIRYIAkVyPItydWaSFa6IRETIryshiZO8CS+n"
-    private var uid = 925813821
+    /*private var token = "OMtRTNxo5Buk/PAl0ZjHde5Vg5TdIRYIAkVyPItydWaSFa6IRETIryshiZO8CS+n"
+    private var uid = "925813821"*/
     private var gen = 4 // 每次要修改token, uid的硬编码时, 都要修改这个值
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -107,14 +108,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         val lastGen = sp.getInt("gen", -1)
-        if (gen != lastGen) {
+        /*if (gen != lastGen) {
             sp.edit { putInt("gen", gen) }
             sp.edit { putString("token", token) }
-            sp.edit { putInt("uid", uid) }
-        }
+            sp.edit { putString("uid", uid) }
+        }*/
 
-        token = sp.getString("token", token) ?: token
-        uid = sp.getInt("uid", uid)
+        //token = sp.getString("token", token) ?: token
+        //uid = sp.getString("uid", uid) ?: uid
 
         // 初始化UI组件
         initViews()
@@ -124,6 +125,7 @@ class MainActivity : AppCompatActivity() {
             // 从assets复制语音数据文件
             //copyAssetsToWeReadVoiceDir(this@MainActivity)
             AssetUnpacker.ensureResourcesAreReady(this@MainActivity)
+            WxTokenManager.refreshTokenIfNeed(this@MainActivity, maxAgeHours = 24)
 
             withContext(Dispatchers.Main) {
                 // 初始化TTS引擎
@@ -136,8 +138,8 @@ class MainActivity : AppCompatActivity() {
      * 初始化UI组件
      */
     private fun initViews() {
-        binding.tokenInput.setText(token)
-        binding.uidInput.setText(uid.toString())
+        //binding.tokenInput.setText(token)
+        //binding.uidInput.setText(uid.toString())
 
         // 设置默认文本
         binding.editTextInput.setText(text)
@@ -196,9 +198,9 @@ class MainActivity : AppCompatActivity() {
             val token = binding.tokenInput.text.toString().trim()
             val uidText = binding.uidInput.text.toString().trim()
 
-            sp.edit { putString("token", token) }
-            sp.edit { putInt("uid", uidText.toInt()) }
-            tts?.setToken(token, if (uidText.isNotEmpty()) uidText.toInt() else 0)
+            /*sp.edit { putString("token", token) }
+            sp.edit { putString("uid", uidText) }
+            tts?.setToken(token, uidText.toLong())*/
 
 
             if (text.isNotEmpty()) {
