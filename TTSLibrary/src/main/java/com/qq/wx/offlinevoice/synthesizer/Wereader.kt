@@ -9,7 +9,7 @@ import java.nio.charset.StandardCharsets
 object PathUtils {
 
     fun checkVoiceResourceExists(context: Context, modeName: String): Boolean {
-        val targetFile = File(getTtsResourcePath(context)).resolve("voices").resolve("${modeName}.bin")
+        val targetFile = File(getVoiceResourceDir(context)).resolve("${modeName}.bin")
         return targetFile.exists()
     }
 
