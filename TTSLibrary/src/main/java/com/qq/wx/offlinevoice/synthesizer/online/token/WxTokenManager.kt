@@ -91,10 +91,10 @@ object WxTokenManager {
      * - 返回刷新后的 token/uid
      */
     @JvmStatic
-    suspend fun refreshTokens(context: Context): TokenUid {
+    suspend fun refreshTokens(context: Context): TokenUid? = runCatching {
         val p = getOrInitProvider(context)
         AppLogger.i(TAG, "外部请求：开始刷新 token（suspend）。")
-        return p.refreshTokensSingleFlight().also {
+        p.refreshTokensSingleFlight().also {
             AppLogger.i(
                 TAG,
                 "外部请求：刷新 token 成功。token=${LogMask.maskToken(it.token)}, uid=${
@@ -102,25 +102,8 @@ object WxTokenManager {
                 }"
             )
         }
-    }
+    }.getOrNull()
 
-    /**
-     * 阻塞版本：刷新 token。
-     * - 警告：请勿在主线程调用，可能导致 ANR。
-     * - 推荐优先使用协程版本 refreshTokens(context)。
-     */
-    @JvmStatic
-    fun refreshTokensBlocking(context: Context): TokenUid {
-        if (Looper.getMainLooper().thread == Thread.currentThread()) {
-            AppLogger.w(
-                TAG,
-                "refreshTokensBlocking 在主线程调用，可能引发 ANR。建议使用协程版本 refreshTokens(context)。"
-            )
-        }
-        return runBlocking {
-            refreshTokens(context)
-        }
-    }
 
     /**
      * 获取当前内存态 token/uid（不触发网络）。
@@ -154,18 +137,6 @@ object WxTokenManager {
         p.setManualToken(token, uid)
     }
 
-    /**
-     * 预取（可选）：当本地 token/uid 为空或过旧时，可以主动调用预取以降低首次失败率。
-     * - 不会抛异常，失败返回 false 并打印详细日志
-     */
-    @JvmStatic
-    suspend fun prefetchIfStale(context: Context): Boolean {
-        val p = getOrInitProvider(context)
-        AppLogger.d(TAG, "外部请求：尝试预取 token（若判定为陈旧）。")
-        return p.prefetchIfStale().also { ok ->
-            AppLogger.d(TAG, "外部请求：预取结果=$ok。")
-        }
-    }
 
 
     /**
@@ -177,25 +148,22 @@ object WxTokenManager {
      * @param maxAgeHours 最大允许年龄（小时），默认 24
      */
     @JvmStatic
-    suspend fun refreshTokenIfNeed(context: Context, maxAgeHours: Long = 24): TokenUid {
-        val p = getOrInitProvider(context)
-        val maxAgeMillis = maxAgeHours * 60 * 60 * 1000
-        AppLogger.i(TAG, "外部请求：refreshTokenIfNeed 检查是否需要刷新（maxAgeHours=$maxAgeHours）。")
-        val result = p.refreshTokenIfNeed(maxAgeMillis)
-        AppLogger.i(TAG, "外部请求：refreshTokenIfNeed 完成。token=${LogMask.maskToken(result.token)}, uid=${LogMask.maskUid(result.uid)}")
-        return result
-    }
-
-    /**
-     * （可选）阻塞版本：按需刷新。避免在主线程调用。
-     */
-    @JvmStatic
-    fun refreshTokenIfNeedBlocking(context: Context, maxAgeHours: Long = 24): TokenUid {
-        if (Looper.getMainLooper().thread == Thread.currentThread()) {
-            AppLogger.w(TAG, "refreshTokenIfNeedBlocking 在主线程调用，可能引发 ANR。建议使用协程版本 refreshTokenIfNeed(context)。")
-        }
-        return runBlocking {
-            refreshTokenIfNeed(context, maxAgeHours)
-        }
+    suspend fun refreshTokenIfNeed(context: Context, maxAgeHours: Long = 24): TokenUid? {
+        return runCatching {
+            val p = getOrInitProvider(context)
+            val maxAgeMillis = maxAgeHours * 60 * 60 * 1000
+            AppLogger.i(
+                TAG,
+                "外部请求：refreshTokenIfNeed 检查是否需要刷新（maxAgeHours=$maxAgeHours）。"
+            )
+            val result = p.refreshTokenIfNeed(maxAgeMillis)
+            AppLogger.i(
+                TAG,
+                "外部请求：refreshTokenIfNeed 完成。token=${LogMask.maskToken(result.token)}, uid=${
+                    LogMask.maskUid(result.uid)
+                }"
+            )
+            result
+        }.getOrNull()
     }
 }
