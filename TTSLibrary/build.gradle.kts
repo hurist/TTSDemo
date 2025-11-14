@@ -48,3 +48,20 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 }
+
+afterEvaluate {
+    tasks.register<Jar>("androidSourcesJar") {
+        archiveClassifier.set("sources")
+
+        // Android 已统一 Java/Kotlin 源集，这里包含 Java + Kotlin 文件夹
+        from(android.sourceSets["main"].java.srcDirs)
+
+        // 额外包含 manifest 与 res（可选）
+        from("src/main/aidl")
+        from("src/main/manifest")
+    }
+
+    artifacts {
+        add("archives", tasks.named("androidSourcesJar"))
+    }
+}

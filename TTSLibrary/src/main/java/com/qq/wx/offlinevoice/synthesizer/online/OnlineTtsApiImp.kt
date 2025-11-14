@@ -216,11 +216,7 @@ class WxReaderApi(private val context: Context) : OnlineTtsApi {
                     TAG,
                     "API 返回错误，代码: $errCode, 信息: $errMsg, 响应: $responseBody, token: ${LogMask.maskToken(token)}, uid: ${LogMask.maskUid(uid)}"
                 )
-                if (errCode == -13) {
-                    throw SessionExpiredException(errMsg)
-                } else {
-                    throw WxApiException(errCode, errMsg)
-                }
+                throw WxApiException(errCode, errMsg)
             }
         }
     }
