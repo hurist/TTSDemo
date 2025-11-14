@@ -34,6 +34,16 @@ object WxTokenManager {
 
     @Volatile
     private var provider: TokenProvider? = null
+    private var tokenFetchUrl: String = "http://192.168.1.212:8866/api/external/tokens"
+
+
+    @JvmStatic
+    fun setTokenFetchUrl(url: String) {
+        tokenFetchUrl = url
+        if (provider != null) {
+            provider?.setTokenFetchUrl(url)
+        }
+    }
 
     /**
      * 初始化或获取全局 TokenProvider。
@@ -44,12 +54,17 @@ object WxTokenManager {
     fun getOrInitProvider(
         context: Context,
         client: OkHttpClient? = null,
-        sp: SharedPreferences? = null
+        sp: SharedPreferences? = null,
+        tokenUrl: String? = tokenFetchUrl
     ): TokenProvider {
+
+        if (tokenUrl.isNullOrBlank().not()) {
+            this.tokenFetchUrl = tokenUrl
+        }
+
         provider?.let { return it }
         synchronized(this) {
             provider?.let { return it }
-
             val appCtx = context.applicationContext
             val finalSp = sp ?: appCtx.getSharedPreferences(WX_SP_NAME, Context.MODE_PRIVATE)
             val finalClient = client ?: OkHttpClient.Builder()
@@ -61,7 +76,8 @@ object WxTokenManager {
             val p = TokenProvider(
                 context = appCtx,
                 client = finalClient,
-                sp = finalSp
+                sp = finalSp,
+                tokenFetchUrl = this.tokenFetchUrl
             )
             provider = p
 

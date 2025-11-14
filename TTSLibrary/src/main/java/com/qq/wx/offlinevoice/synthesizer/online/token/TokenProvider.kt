@@ -23,7 +23,8 @@ import okhttp3.OkHttpClient
 class TokenProvider(
     private val context: Context,
     private val client: OkHttpClient,
-    private val sp: SharedPreferences
+    private val sp: SharedPreferences,
+    private var tokenFetchUrl: String,
 ) {
 
     private val TAG = "TokenProvider"
@@ -49,8 +50,13 @@ class TokenProvider(
                 .readTimeout(java.time.Duration.ofSeconds(8))
                 .connectTimeout(java.time.Duration.ofSeconds(5))
                 .build(),
-            baseUrl = "http://192.168.1.212:8866"
+            url = tokenFetchUrl
         )
+    }
+
+    fun setTokenFetchUrl(newUrl: String) {
+        tokenFetchUrl = newUrl
+        remote.setUrl(newUrl)
     }
 
     /**

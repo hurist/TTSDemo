@@ -20,12 +20,15 @@ import org.json.JSONObject
  */
 class TokenRemoteDataSource(
     private val client: OkHttpClient,
-    private val baseUrl: String
+    private var url: String
 ) {
     private val TAG = "TokenRemoteDataSource"
 
+    fun setUrl(newUrl: String) {
+        url = newUrl
+    }
+
     suspend fun fetchLatestToken(): TokenUid {
-        val url = "$baseUrl/api/external/tokens"
         AppLogger.d(TAG, "请求令牌服务: $url")
         val request = Request.Builder()
             .url(url)
