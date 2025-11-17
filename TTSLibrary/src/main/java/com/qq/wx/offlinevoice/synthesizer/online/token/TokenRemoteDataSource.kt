@@ -2,8 +2,11 @@ package com.qq.wx.offlinevoice.synthesizer.online.token
 
 import com.qq.wx.offlinevoice.synthesizer.AppLogger
 import com.qq.wx.offlinevoice.synthesizer.online.LogMask
+import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody
 import org.json.JSONObject
 
 /**
@@ -20,7 +23,8 @@ import org.json.JSONObject
  */
 class TokenRemoteDataSource(
     private val client: OkHttpClient,
-    private var url: String
+    private var url: String,
+    private var appId: String
 ) {
     private val TAG = "TokenRemoteDataSource"
 
@@ -28,10 +32,18 @@ class TokenRemoteDataSource(
         url = newUrl
     }
 
+    fun setAppId(newAppId: String) {
+        appId = newAppId
+    }
+
     suspend fun fetchLatestToken(): TokenUid {
         AppLogger.d(TAG, "请求令牌服务: $url")
+        val httpUrl = url.toHttpUrlOrNull()?.newBuilder()
+            ?.addQueryParameter("app_id", appId)
+            ?.build() ?: throw TokenServiceException("无效的令牌服务 URL：$url")
+
         val request = Request.Builder()
-            .url(url)
+            .url(httpUrl)
             .get()
             .build()
         val response = client.newCall(request).execute()

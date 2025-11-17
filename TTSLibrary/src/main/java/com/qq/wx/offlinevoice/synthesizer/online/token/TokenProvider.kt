@@ -25,6 +25,7 @@ class TokenProvider(
     private val client: OkHttpClient,
     private val sp: SharedPreferences,
     private var tokenFetchUrl: String,
+    private var appId: String
 ) {
 
     private val TAG = "TokenProvider"
@@ -50,13 +51,19 @@ class TokenProvider(
                 .readTimeout(java.time.Duration.ofSeconds(8))
                 .connectTimeout(java.time.Duration.ofSeconds(5))
                 .build(),
-            url = tokenFetchUrl
+            url = tokenFetchUrl,
+            appId = appId
         )
     }
 
     fun setTokenFetchUrl(newUrl: String) {
         tokenFetchUrl = newUrl
         remote.setUrl(newUrl)
+    }
+
+    fun setAppId(id: String) {
+        appId = id
+        remote.setAppId(id)
     }
 
     /**

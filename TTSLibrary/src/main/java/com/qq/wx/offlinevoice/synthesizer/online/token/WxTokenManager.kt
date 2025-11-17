@@ -35,6 +35,7 @@ object WxTokenManager {
     @Volatile
     private var provider: TokenProvider? = null
     private var tokenFetchUrl: String = "http://192.168.1.212:8866/api/external/tokens"
+    private var appId = ""
 
 
     @JvmStatic
@@ -42,6 +43,14 @@ object WxTokenManager {
         tokenFetchUrl = url
         if (provider != null) {
             provider?.setTokenFetchUrl(url)
+        }
+    }
+
+    @JvmStatic
+    fun setAppId(id: String) {
+        appId = id
+        if (provider != null) {
+            provider?.setAppId(id)
         }
     }
 
@@ -55,11 +64,16 @@ object WxTokenManager {
         context: Context,
         client: OkHttpClient? = null,
         sp: SharedPreferences? = null,
-        tokenUrl: String? = tokenFetchUrl
+        tokenUrl: String? = tokenFetchUrl,
+        appId: String? = this.appId
     ): TokenProvider {
 
         if (tokenUrl.isNullOrBlank().not()) {
             this.tokenFetchUrl = tokenUrl
+        }
+
+        if (appId.isNullOrBlank().not()) {
+            this.appId = appId
         }
 
         provider?.let { return it }
@@ -77,7 +91,8 @@ object WxTokenManager {
                 context = appCtx,
                 client = finalClient,
                 sp = finalSp,
-                tokenFetchUrl = this.tokenFetchUrl
+                tokenFetchUrl = this.tokenFetchUrl,
+                appId = this.appId
             )
             provider = p
 
