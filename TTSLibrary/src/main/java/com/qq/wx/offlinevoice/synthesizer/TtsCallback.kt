@@ -51,6 +51,14 @@ interface TtsCallback {
      */
     fun onStateChanged(newState: TtsPlaybackState)
 
+    /**
+     * 跳转到特定句子时调用
+     * @param sentenceIndex 句子的索引（从0开始）
+     * @param sentence 句子的文本
+     * @param startPos 句子在整体文本中的起始位置
+     * @param endPos 句子在整体文本中的结束位置
+     */
+    fun onSeekComplete(sentenceIndex: Int, sentence: String, startPos: Int, endPos: Int) {}
     
     /**
      * 所有句子都已成功朗读时调用

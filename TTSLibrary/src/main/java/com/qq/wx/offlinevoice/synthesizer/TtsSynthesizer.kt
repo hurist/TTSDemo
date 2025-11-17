@@ -829,6 +829,12 @@ class TtsSynthesizer(
                 playingSentenceIndex = targetSeg
                 startSynthesis()
                 AppLogger.d(TAG, "handleSeekTo: 新的合成任务已从物理段索引 $targetSeg (逻辑行=$clamped) 启动。")
+                currentCallback?.onSeekComplete(
+                    sentence = lineTexts.getOrNull(clamped) ?: "",
+                    sentenceIndex = clamped,
+                    startPos = lineStartPos.getOrNull(clamped) ?: 0,
+                    endPos = lineEndPos.getOrNull(clamped) ?: 0,
+                )
             }
             TtsPlaybackState.PAUSED -> {
                 AppLogger.i(TAG, "handleSeekTo: 暂停中收到 seek 到逻辑行 #$clamped，将在恢复时生效。")
@@ -839,6 +845,12 @@ class TtsSynthesizer(
                 } else {
                     AppLogger.d(TAG, "handleSeekTo: 暂停期已预备重启过，本次 seek 不再重复清队。")
                 }
+                currentCallback?.onSeekComplete(
+                    sentence = lineTexts.getOrNull(clamped) ?: "",
+                    sentenceIndex = clamped,
+                    startPos = lineStartPos.getOrNull(clamped) ?: 0,
+                    endPos = lineEndPos.getOrNull(clamped) ?: 0,
+                )
             }
             else -> {
                 AppLogger.w(TAG, "handleSeekTo: 当前状态($currentState)不支持立即 seek。建议在 speak 后或恢复/播放中使用。", important = true)
