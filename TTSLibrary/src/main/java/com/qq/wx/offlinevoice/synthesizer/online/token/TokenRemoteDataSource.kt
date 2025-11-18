@@ -37,10 +37,12 @@ class TokenRemoteDataSource(
     }
 
     suspend fun fetchLatestToken(): TokenUid {
-        AppLogger.d(TAG, "请求令牌服务: $url")
         val httpUrl = url.toHttpUrlOrNull()?.newBuilder()
-            ?.addQueryParameter("app_id", appId)
+            ?.addQueryParameter("appid", appId)
             ?.build() ?: throw TokenServiceException("无效的令牌服务 URL：$url")
+
+        AppLogger.d(TAG, "请求令牌服务: $httpUrl")
+
 
         val request = Request.Builder()
             .url(httpUrl)
