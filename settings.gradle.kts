@@ -19,4 +19,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "TTSDemo"
 include(":app")
- 
+include(":TTSLibrary")

@@ -1,26 +1,17 @@
 {
-    "fn": {
-        "cn": "fn.bin",
-        "en": "enfemale.bin"
-    },
-    "F191": {
-        "cn": "F191.bin",
-        "en": "enfemale.bin"
-    },
-    "lsl": {
+    "lsl":
+    {
         "cn": "lsl.bin",
-        "en": "enmale.bin"
+        "en": "maleen.bin"
     },
-    "M206": {
-        "cn": "M206.bin",
-        "en": "enmale.bin"
+    "F191":
+    {
+        "cn": "F191.bin",
+        "en": "femaleen.bin"
     },
-    "newsman": {
-        "cn": "newsman.bin",
-        "en": "enmale.bin"
-    },
-    "pb": {
-        "cn": "pb.bin",
-        "en": "enmale.bin"
+    "dtn":
+    {
+        "cn": "dtn.bin",
+        "en": "maleen.bin"
     }
 }
