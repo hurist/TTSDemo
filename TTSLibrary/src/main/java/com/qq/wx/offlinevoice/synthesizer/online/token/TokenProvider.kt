@@ -3,9 +3,12 @@ package com.qq.wx.offlinevoice.synthesizer.online.token
 import android.content.Context
 import android.content.SharedPreferences
 import com.qq.wx.offlinevoice.synthesizer.AppLogger
+import com.qq.wx.offlinevoice.synthesizer.SSLHelper
 import com.qq.wx.offlinevoice.synthesizer.online.LogMask
 import kotlinx.coroutines.CompletableDeferred
+import okhttp3.ConnectionSpec
 import okhttp3.OkHttpClient
+import java.util.concurrent.TimeUnit
 
 /**
  * TokenProvider
@@ -45,11 +48,21 @@ class TokenProvider(
 
     // 远端数据源（使用同一连接池，但缩短整体超时，避免拖慢 TTS 重试）
     private val remote by lazy {
+        val specs = ArrayList<ConnectionSpec>().apply {
+            add(ConnectionSpec.MODERN_TLS)
+            add(ConnectionSpec.COMPATIBLE_TLS)
+            add(ConnectionSpec.CLEARTEXT)
+        }
         TokenRemoteDataSource(
             client = client.newBuilder()
-                .callTimeout(java.time.Duration.ofSeconds(10))
-                .readTimeout(java.time.Duration.ofSeconds(8))
-                .connectTimeout(java.time.Duration.ofSeconds(5))
+                .callTimeout(10, TimeUnit.SECONDS)
+                .readTimeout(8, TimeUnit.SECONDS)
+                .connectTimeout(5, TimeUnit.SECONDS)
+                .sslSocketFactory(SSLHelper.unsafeSSLSocketFactory, SSLHelper.unsafeTrustManager)
+                .hostnameVerifier(SSLHelper.unsafeHostnameVerifier)
+                .followRedirects(true)
+                .followSslRedirects(true)
+                .connectionSpecs(specs)
                 .build(),
             url = tokenFetchUrl,
             appId = appId

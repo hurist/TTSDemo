@@ -19,6 +19,7 @@ import kotlin.coroutines.resumeWithException
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 import com.qq.wx.offlinevoice.synthesizer.AppLogger
+import com.qq.wx.offlinevoice.synthesizer.SSLHelper
 import com.qq.wx.offlinevoice.synthesizer.online.token.KEY_TOKEN
 import com.qq.wx.offlinevoice.synthesizer.online.token.TokenProvider
 import com.qq.wx.offlinevoice.synthesizer.online.token.KEY_UID
@@ -26,6 +27,7 @@ import com.qq.wx.offlinevoice.synthesizer.online.token.WX_SP_NAME
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import okhttp3.ConnectionSpec
 
 class WxReaderApi(private val context: Context) : OnlineTtsApi {
 
@@ -40,11 +42,21 @@ class WxReaderApi(private val context: Context) : OnlineTtsApi {
     private var token = ""
     private var uid = 0L
 
+    val specs = ArrayList<ConnectionSpec>().apply {
+        add(ConnectionSpec.MODERN_TLS)
+        add(ConnectionSpec.COMPATIBLE_TLS)
+        add(ConnectionSpec.CLEARTEXT)
+    }
     private val client = OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS) // 单次读超时
         .writeTimeout(20, TimeUnit.SECONDS)
         .callTimeout(30, TimeUnit.SECONDS) // 关键：整个调用的总超时
+        .sslSocketFactory(SSLHelper.unsafeSSLSocketFactory, SSLHelper.unsafeTrustManager)
+        .hostnameVerifier(SSLHelper.unsafeHostnameVerifier)
+        .followRedirects(true)
+        .followSslRedirects(true)
+        .connectionSpecs(specs)
         .build()
 
 
