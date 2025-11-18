@@ -66,6 +66,7 @@ class TtsSynthesizer(
         object Success : SynthesisResult()
         data class Failure(val reason: String) : SynthesisResult()
         object Deferred : SynthesisResult() // 暂不产出（如保护期/会话切换）
+        data class Skip(val reason: String) : SynthesisResult()
     }
 
     private sealed class Command {
@@ -358,7 +359,7 @@ class TtsSynthesizer(
                     // 映射到逻辑行
                     val lineId = segmentToLine.getOrNull(command.index) ?: command.index
                     playingSentenceIndex = command.index // 内部仍记录物理段
-                    if (!lineStarted.contains(lineId)) {
+                    //if (!lineStarted.contains(lineId)) {
                         lineStarted.add(lineId)
                         currentCallback?.onSentenceStart(
                             sentenceIndex = lineId,
@@ -377,7 +378,7 @@ class TtsSynthesizer(
                             startPos = lineStartPos.getOrNull(lineId) ?: command.startPos,
                             endPos = lineEndPos.getOrNull(lineId) ?: command.endPos,
                         )
-                    }
+                    //}
                 }
                 is Command.InternalSentenceEnd -> {
                     val lineId = segmentToLine.getOrNull(command.index) ?: command.index
@@ -939,7 +940,9 @@ class TtsSynthesizer(
                         if (onlineResult is SynthesisResult.Success) {
                             resetOnlineCooldown(); onlineResult
                         } else {
-                            activateOnlineCooldown()
+                            if (onlineResult !is SynthesisResult.Skip) {
+                                activateOnlineCooldown()
+                            }
                             if (sessionStrategy == TtsStrategy.ONLINE_PREFERRED) {
                                 AppLogger.w(TAG, "在线路径失败(缓存未命中/无PCM或API错误)，回退至[离线模式]。原因: ${(onlineResult as? SynthesisResult.Failure)?.reason ?: "unknown"}")
                                 performOfflineSynthesis(index, bag)
@@ -966,6 +969,7 @@ class TtsSynthesizer(
                         synthesisFailed = true
                         break
                     }
+                    else -> { /* no-op */}
                 }
             }
         } catch (_: CancellationException) {
@@ -1099,6 +1103,9 @@ class TtsSynthesizer(
             val code = e.errorCode
             val reason = "合成[在线] (句子 $bag)失败: ${e.message}, code=$code"
             AppLogger.e(TAG, reason, important = true)
+            if (code == 1111) {
+                return SynthesisResult.Skip("在线合成请求被拒绝（跳过）: $reason")
+            }
             return SynthesisResult.Failure(reason)
         } catch (e: Exception) {
             val reason = "合成[在线] (句子 $bag)失败: ${e.message}"
