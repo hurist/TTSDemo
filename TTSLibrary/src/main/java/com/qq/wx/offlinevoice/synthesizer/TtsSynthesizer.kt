@@ -146,7 +146,6 @@ class TtsSynthesizer(
 
     private val audioPlayer: AudioPlayer = AudioPlayer(initialSampleRate = TtsConstants.DEFAULT_SAMPLE_RATE)
 
-    private val engineMutex = Mutex()
     private var isPausedByError = false
     private var onlineAudioProcessor: AudioSpeedProcessor? = null
     private val processorMutex = Mutex()
@@ -209,6 +208,7 @@ class TtsSynthesizer(
     companion object {
         private const val TAG = "TtsSynthesizer"
         private val instanceCount = AtomicInteger(0)
+        private val nativeEngineLock = Mutex()
         @Volatile private var nativeEngine: SynthesizerNative? = null
         @Volatile private var currentVoiceCode: String? = null
 
@@ -725,11 +725,12 @@ class TtsSynthesizer(
         commandChannel.close()
         strategyManager.release()
         networkMonitor.release()
-        
-        if (instanceCount.decrementAndGet() == 0) {
-            nativeEngine?.destroy()
-            nativeEngine = null
-            currentVoiceCode = null
+        nativeEngineLock.withLock {
+            if (instanceCount.decrementAndGet() == 0) {
+                nativeEngine?.destroy()
+                nativeEngine = null
+                currentVoiceCode = null
+            }
         }
         currentCallback = null
     }
@@ -1122,7 +1123,7 @@ class TtsSynthesizer(
         }
 
         val sentence = bag.text
-        return engineMutex.withLock {
+        return nativeEngineLock.withLock {
             try {
                 val trimmed = sentence.trim()
                 if (trimmed.isEmpty()) {
