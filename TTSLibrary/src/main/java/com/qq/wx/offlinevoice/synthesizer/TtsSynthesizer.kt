@@ -1041,7 +1041,7 @@ class TtsSynthesizer(
             val strategy = strategyManager.currentStrategy
             val lineId = bag.originalGroupId
             val shouldBuffer = (strategy == TtsStrategy.ONLINE_PREFERRED || strategy == TtsStrategy.ONLINE_ONLY) &&
-                    (lineId == segmentToLine.getOrNull(playingSentenceIndex) && bag.partInGroup == 0 /*|| lineId == (segmentToLine.getOrNull(playingSentenceIndex) ?: 0) + 1*/)
+                    (lineId == segmentToLine.getOrNull(playingSentenceIndex) /*&& bag.partInGroup == 0 || lineId == (segmentToLine.getOrNull(playingSentenceIndex) ?: 0) + 1*/)
 
             if (shouldBuffer) {
                 scheduleBufferingIfNeeded(index)
