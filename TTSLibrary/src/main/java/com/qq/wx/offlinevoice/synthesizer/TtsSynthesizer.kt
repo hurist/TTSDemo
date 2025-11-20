@@ -1107,11 +1107,13 @@ class TtsSynthesizer(
             if (code == 1111 || code == 1110) {
                 return SynthesisResult.Skip("在线合成请求被拒绝（跳过）: $reason")
             }
-            currentCallback?.onlineError(code, "${e.message}_${bag.text.take(10)}")
+            currentCallback?.onSynthesisError(SynthesisMode.ONLINE, errorCode = code, errorMessage = "${e.message}_${bag.text.take(10)}")
             return SynthesisResult.Failure(reason)
         } catch (e: Exception) {
             val reason = "合成[在线] (句子 $bag)失败: ${e.message}"
-            currentCallback?.onlineError(-1, "${e.message}_${bag.text.take(10)}")
+            if (e !is ForbiddenNetworkException) {
+                currentCallback?.onSynthesisError(SynthesisMode.ONLINE, errorCode = -1, errorMessage = "${e.message}_${bag.text.take(10)}")
+            }
             AppLogger.e(TAG, reason, important = true)
             return SynthesisResult.Failure(reason)
         }
@@ -1173,6 +1175,7 @@ class TtsSynthesizer(
                     val status = nativeEngine?.synthesize(pcmArray, TtsConstants.PCM_BUFFER_SIZE, synthResult, 1) ?: -1
                     if (status == -1) {
                         val reason = "合成[离线]句子合成失败，状态码: -1"
+                        currentCallback?.onSynthesisError(SynthesisMode.OFFLINE,"${reason}_${bag.text.take(10)}")
                         AppLogger.e(TAG, reason, important = true)
                         return@withLock SynthesisResult.Success
                     }
@@ -1212,6 +1215,7 @@ class TtsSynthesizer(
             } catch (e: Exception) {
                 val reason = "合成[离线](句子 $bag)异常: ${e.message}"
                 AppLogger.e(TAG, reason, e, important = true)
+                currentCallback?.onSynthesisError(SynthesisMode.OFFLINE,"${e.message}_${bag.text.take(10)}")
                 SynthesisResult.Failure(reason)
             } finally {
                 nativeEngine?.reset()

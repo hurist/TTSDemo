@@ -66,7 +66,7 @@ class TtsRepository(
                 // --- 2. 新增的核心逻辑：在请求网络前检查 allowNetwork 标志 ---
                 if (!allowNetwork) {
                     // 如果缓存未命中且网络请求被禁止，则必须失败。
-                    throw IOException("缓存未命中，且网络请求被禁止 (例如：正处于冷却期)")
+                    throw ForbiddenNetworkException("缓存未命中，且网络请求被禁止 (例如：正处于冷却期)")
                 }
 
                 if (networkMonitor.isNetworkGood.value.not()) {
@@ -118,3 +118,5 @@ class TtsRepository(
         }
     }
 }
+
+internal class ForbiddenNetworkException(message: String) : Exception(message)
