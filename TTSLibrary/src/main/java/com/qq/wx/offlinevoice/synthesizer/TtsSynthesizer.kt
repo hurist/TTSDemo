@@ -357,6 +357,7 @@ class TtsSynthesizer(
                 }
                 is Command.InternalSentenceStart -> {
                     // 映射到逻辑行
+                    clearBufferingOnProgress(command.index)
                     val lineId = segmentToLine.getOrNull(command.index) ?: command.index
                     playingSentenceIndex = command.index // 内部仍记录物理段
                     //if (!lineStarted.contains(lineId)) {
@@ -1105,6 +1106,7 @@ class TtsSynthesizer(
             val reason = "合成[在线] (句子 $bag)失败: ${e.message}, code=$code"
             AppLogger.e(TAG, reason, important = true)
             currentCallback?.onSynthesisError(SynthesisMode.ONLINE, errorCode = code, errorMessage = "${e.message}_${bag.text.take(10)}")
+            clearBufferingOnProgress(index)
             if (code == 1111 || code == 1110) {
                 return SynthesisResult.Skip("在线合成请求被拒绝（跳过）: $reason")
             }
@@ -1114,6 +1116,7 @@ class TtsSynthesizer(
             if (e !is ForbiddenNetworkException) {
                 currentCallback?.onSynthesisError(SynthesisMode.ONLINE, errorCode = -1, errorMessage = "${e.message}_${bag.text.take(10)}")
             }
+            clearBufferingOnProgress(index)
             AppLogger.e(TAG, reason, important = true)
             return SynthesisResult.Failure(reason)
         }
@@ -1639,9 +1642,10 @@ class TtsSynthesizer(
         }
     }
 
+
     private fun endBufferingIfNeeded(index: Int) {
         val target = bufferingSentenceIndex
-        if (target != null && target == index) {
+        if (target != null && index >= target) {
             bufferingJob?.cancel()
             bufferingJob = null
             bufferingSentenceIndex = null
@@ -1649,6 +1653,11 @@ class TtsSynthesizer(
                 updateState(TtsPlaybackState.PLAYING)
             }
         }
+    }
+
+    // 可选：一个仅在“匹配/越过时”清理的便捷封装（调用 endBufferingIfNeeded 即可）
+    private fun clearBufferingOnProgress(index: Int) {
+        endBufferingIfNeeded(index)
     }
 
     private fun cancelBuffering() {
