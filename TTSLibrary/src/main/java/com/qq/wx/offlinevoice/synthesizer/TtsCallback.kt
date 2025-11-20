@@ -87,4 +87,11 @@ interface TtsCallback {
      * @param level 日志级别
      */
     fun onLog(level: Level, logMessage: String) {}
+
+    /**
+     * 在线合成错误回调
+     * @param errorCode 错误码
+     * @param errorMessage 错误描述
+     */
+    fun onlineError(errorCode: Int?, errorMessage: String?) {}
 }
