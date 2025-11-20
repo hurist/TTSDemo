@@ -1104,10 +1104,10 @@ class TtsSynthesizer(
             val code = e.errorCode
             val reason = "合成[在线] (句子 $bag)失败: ${e.message}, code=$code"
             AppLogger.e(TAG, reason, important = true)
+            currentCallback?.onSynthesisError(SynthesisMode.ONLINE, errorCode = code, errorMessage = "${e.message}_${bag.text.take(10)}")
             if (code == 1111 || code == 1110) {
                 return SynthesisResult.Skip("在线合成请求被拒绝（跳过）: $reason")
             }
-            currentCallback?.onSynthesisError(SynthesisMode.ONLINE, errorCode = code, errorMessage = "${e.message}_${bag.text.take(10)}")
             return SynthesisResult.Failure(reason)
         } catch (e: Exception) {
             val reason = "合成[在线] (句子 $bag)失败: ${e.message}"
@@ -1157,6 +1157,7 @@ class TtsSynthesizer(
                 if (prepare != 0) {
                     val reason = "合成[离线]句子准备失败 (code=$prepare) 句子: $bag"
                     AppLogger.e(TAG, "prepare 失败：$reason（按成功跳过处理，避免打断整体流程）")
+                    currentCallback?.onSynthesisError(SynthesisMode.OFFLINE,"code=${prepare}_${bag.text.take(10)}")
                     return@withLock SynthesisResult.Success
                 }
 
