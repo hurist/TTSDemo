@@ -944,7 +944,14 @@ class TtsSynthesizer(
                             resetOnlineCooldown(); onlineResult
                         } else {
                             if (onlineResult !is SynthesisResult.Skip) {
-                                activateOnlineCooldown()
+                                val isAlreadyCoolingDown = System.currentTimeMillis() < onlineCooldownUntilTimestamp
+                                if (!isAlreadyCoolingDown) {
+                                    // 只有在非冷却期内的失败，才激活新的冷却
+                                    activateOnlineCooldown()
+                                } else {
+                                    // 如果已经在冷却期内，可以打个日志，但不再增加惩罚
+                                    AppLogger.d(TAG, "在冷却期内再次在线合成失败，忽略惩罚累加。")
+                                }
                             }
                             if (sessionStrategy == TtsStrategy.ONLINE_PREFERRED) {
                                 AppLogger.w(TAG, "在线路径失败(缓存未命中/无PCM或API错误)，回退至[离线模式]。原因: ${(onlineResult as? SynthesisResult.Failure)?.reason ?: "unknown"}")
@@ -1040,11 +1047,12 @@ class TtsSynthesizer(
             val start = System.currentTimeMillis()
 
             val isCoolingDown = System.currentTimeMillis() < onlineCooldownUntilTimestamp
+            AppLogger.d(TAG, "当前在线合成冷却状态: $isCoolingDown 剩余时间: ${(onlineCooldownUntilTimestamp - System.currentTimeMillis()).coerceAtLeast(0)} ms")
 
             val strategy = strategyManager.currentStrategy
             val lineId = bag.originalGroupId
             val shouldBuffer = (strategy == TtsStrategy.ONLINE_PREFERRED || strategy == TtsStrategy.ONLINE_ONLY) &&
-                    (lineId == segmentToLine.getOrNull(playingSentenceIndex) /*&& bag.partInGroup == 0 || lineId == (segmentToLine.getOrNull(playingSentenceIndex) ?: 0) + 1*/)
+                    (lineId == segmentToLine.getOrNull(playingSentenceIndex) || index == playingSentenceIndex /*&& bag.partInGroup == 0 || lineId == (segmentToLine.getOrNull(playingSentenceIndex) ?: 0) + 1*/)
 
             if (shouldBuffer) {
                 scheduleBufferingIfNeeded(index)
