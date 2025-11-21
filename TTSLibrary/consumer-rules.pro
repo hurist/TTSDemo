@@ -27,6 +27,12 @@
     <init>(...);
 }
 
+-keep class com.qq.wx.offlinevoice.synthesizer.DecodedPcm {
+    <fields>;
+    <methods>;
+    <init>(...);
+}
+
 # Keep all enums and their values
 -keep enum com.qq.wx.offlinevoice.synthesizer.TtsPlaybackState {
     **[] $VALUES;
@@ -39,6 +45,11 @@
 }
 
 -keep enum com.qq.wx.offlinevoice.synthesizer.SynthesisMode {
+    **[] $VALUES;
+    public *;
+}
+
+-keep enum com.qq.wx.offlinevoice.synthesizer.Level {
     **[] $VALUES;
     public *;
 }
@@ -91,6 +102,14 @@
     volatile <fields>;
 }
 
+# Keep Kotlin Flow classes (used in NetworkMonitor and other components)
+-keepclassmembers class kotlinx.coroutines.flow.StateFlow {
+    <methods>;
+}
+-keepclassmembers class kotlinx.coroutines.flow.MutableStateFlow {
+    <methods>;
+}
+
 # ============ OkHttp ============
 # OkHttp platform used only on JVM and when Conscrypt and other security providers are available
 -dontwarn okhttp3.**
@@ -131,6 +150,36 @@
 -keep enum com.qq.wx.offlinevoice.synthesizer.SentenceSplitterStrategy {
     **[] $VALUES;
     public *;
+}
+
+# ============ Cache Module ============
+# Keep cache interface (may be accessed via reflection or dependency injection)
+-keep interface com.qq.wx.offlinevoice.synthesizer.cache.TtsCache {
+    <methods>;
+}
+
+# ============ Online TTS Module ============
+# Keep MP3 decoder interface (may be used by consumers for custom decoders)
+-keep interface com.qq.wx.offlinevoice.synthesizer.online.Mp3Decoder {
+    <methods>;
+}
+
+# Keep token management interface (may be exposed through API)
+-keep class com.qq.wx.offlinevoice.synthesizer.online.token.TokenProvider {
+    <methods>;
+}
+
+# ============ Network and Strategy Management ============
+# Keep network monitor (used with strategy manager)
+-keep class com.qq.wx.offlinevoice.synthesizer.NetworkMonitor {
+    <fields>;
+    <methods>;
+}
+
+# Keep synthesis strategy manager (accessed by public API)
+-keep class com.qq.wx.offlinevoice.synthesizer.SynthesisStrategyManager {
+    <fields>;
+    <methods>;
 }
 
 # ============ Parcelable ============

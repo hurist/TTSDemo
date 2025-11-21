@@ -2,6 +2,19 @@
 
 本文档说明了为 TTSLibrary 添加的 ProGuard/R8 混淆规则。
 
+## 最近更新 (2025-11-21)
+
+根据最近的代码重构和功能增强，已更新 ProGuard 规则以包含：
+- ✅ 新增枚举类：`SynthesisMode`、`Level`
+- ✅ 新增数据类：`DecodedPcm`（添加到 consumer-rules.pro）
+- ✅ 缓存模块：`TtsCache` 接口和 `TtsCacheImpl` 实现
+- ✅ 在线TTS模块：MP3解码器、Token管理类
+- ✅ 策略管理：`NetworkMonitor`、`SynthesisStrategyManager`
+- ✅ Kotlin Flow 支持：`StateFlow` 和 `MutableStateFlow`
+- ✅ 音频处理：`AudioSpeedProcessor`
+
+这些更新确保所有新增的公共API、回调接口和内部实现类都能正确工作，不会被混淆破坏。
+
 ## 文件说明
 
 ### 1. `consumer-rules.pro`
@@ -25,8 +38,9 @@
 ### 枚举类
 - `TtsPlaybackState` - 播放状态枚举
 - `TtsStrategy` - TTS 策略枚举
-- `SynthesisMode` - 合成模式枚举
+- `SynthesisMode` - 合成模式枚举（在SynthesisStrategyManager中定义）
 - `SentenceSplitterStrategy` - 句子分割策略枚举
+- `Level` - 日志级别枚举（在AppLogger中定义，TtsCallback使用）
 
 ### JNI 本地方法
 - `SynthesizerNative` - 包含本地方法的类，必须保留以确保 JNI 调用正常工作
@@ -34,8 +48,15 @@
 
 ### 依赖库规则
 - **Kotlin Coroutines** - 保留协程相关类和 volatile 字段
+- **Kotlin Flow** - 保留 StateFlow 和 MutableStateFlow 相关方法（用于网络监控等）
 - **OkHttp** - 添加标准 OkHttp ProGuard 规则
 - **Kotlin 元数据** - 保留 Kotlin 反射所需的元数据
+
+### 新增模块（最近代码变更）
+- **缓存模块** - TtsCache 接口和 TtsCacheImpl 实现类
+- **在线TTS模块** - Mp3Decoder、MediaCodecMp3Decoder、OnlineTtsApiImp、Token管理类
+- **策略管理** - NetworkMonitor、SynthesisStrategyManager
+- **音频处理** - AudioSpeedProcessor
 
 ### 数据类特性
 - `component*()` 方法 - Kotlin 数据类解构
