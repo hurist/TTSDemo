@@ -30,6 +30,7 @@ import kotlin.math.min
 import kotlin.math.pow
 import androidx.core.content.edit
 import kotlinx.coroutines.withTimeout
+import java.util.concurrent.CopyOnWriteArrayList
 
 /**
  * TTS 合成器主类（Actor 模型）。
@@ -120,7 +121,7 @@ class TtsSynthesizer(
             return "index=$index, 第$originalGroupId 段 第$partInGroup 句, text='${text.trim()}'"
         }
     }
-    private val sentences = mutableListOf<TtsBag>()
+    private val sentences = CopyOnWriteArrayList<TtsBag>()
 
     @Volatile private var playingSentenceIndex: Int = 0 // 仍指向“物理段”索引
     private var synthesisSentenceIndex by Delegates.observable(0) { _, oldValue, newValue ->
@@ -196,10 +197,10 @@ class TtsSynthesizer(
 
     // ================= 逻辑行映射（行粒度回调门面） =================
     private var totalLogicalLines: Int = 0
-    private val segmentToLine = mutableListOf<Int>()           // 物理段 -> 行ID
+    private val segmentToLine = CopyOnWriteArrayList<Int>()           // 物理段 -> 行ID
     private val lineFirstSegment = mutableListOf<Int>()        // 行ID -> 首物理段索引
     private val lineLastSegment = mutableListOf<Int>()         // 行ID -> 尾物理段索引
-    private val lineTexts = mutableListOf<String>()            // 行完整文本（未经裁剪）
+    private val lineTexts = CopyOnWriteArrayList<String>()            // 行完整文本（未经裁剪）
     private val lineStartPos = mutableListOf<Int>()            // 行整体开始
     private val lineEndPos = mutableListOf<Int>()              // 行整体结束
     private val lineStarted = mutableSetOf<Int>()              // 已触发 start 的行
@@ -1113,7 +1114,7 @@ class TtsSynthesizer(
             return SynthesisResult.Failure(reason)
         } catch (e: Exception) {
             val reason = "合成[在线] (句子 $bag)失败: ${e.message}"
-            if (e !is ForbiddenNetworkException) {
+            if (e !is ForbiddenNetworkException && e !is CancellationException) {
                 currentCallback?.onSynthesisError(SynthesisMode.ONLINE, errorCode = -1, errorMessage = "${e.message}_${bag.text.take(10)}")
             }
             clearBufferingOnProgress(index)
