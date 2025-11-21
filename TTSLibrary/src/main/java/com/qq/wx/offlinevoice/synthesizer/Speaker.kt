@@ -6,8 +6,8 @@ enum class Speaker(
     val modelName: String,
     val isMale: Boolean
 ) {
-    MALE1("tts_valle_m468_19_0718", true),
-    MALE2("tts_valle", true),
+    MALE1("tts_valle", true),
+    MALE2("tts_valle_m468_19_0718", true),
     FEMALE1("tts_valle_caiyu515", false),
     FEMALE2("tts_valle_10373_f561_0619", false);
 
