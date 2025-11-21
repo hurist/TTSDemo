@@ -61,6 +61,17 @@
     public *;
 }
 
+# Specifically keep new enums (explicit for clarity)
+-keep enum com.qq.wx.offlinevoice.synthesizer.SynthesisMode {
+    **[] $VALUES;
+    public *;
+}
+
+-keep enum com.qq.wx.offlinevoice.synthesizer.Level {
+    **[] $VALUES;
+    public *;
+}
+
 # ============ Kotlin Coroutines ============
 -keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}
 -keepnames class kotlinx.coroutines.CoroutineExceptionHandler {}
@@ -78,6 +89,14 @@
 # Keep ServiceLoader
 -keepnames class kotlinx.coroutines.CoroutineExceptionHandler
 -keepnames class kotlinx.coroutines.internal.MainDispatcherFactory
+
+# Keep Kotlin Flow classes (for StateFlow usage in new code)
+-keepclassmembers class kotlinx.coroutines.flow.StateFlow {
+    <methods>;
+}
+-keepclassmembers class kotlinx.coroutines.flow.MutableStateFlow {
+    <methods>;
+}
 
 # ============ OkHttp & Okio ============
 -dontwarn okhttp3.**
@@ -155,6 +174,71 @@
 -keep class com.qq.wx.offlinevoice.synthesizer.online.WxApiException {
     <init>(...);
     <fields>;
+    <methods>;
+}
+
+# ============ Cache Module (New) ============
+# Keep cache interface and implementation
+-keep interface com.qq.wx.offlinevoice.synthesizer.cache.TtsCache {
+    <methods>;
+}
+
+-keep class com.qq.wx.offlinevoice.synthesizer.cache.TtsCacheImpl {
+    <init>(...);
+    <methods>;
+}
+
+# ============ Online TTS Module (New) ============
+# Keep MP3 decoder interface and implementation
+-keep interface com.qq.wx.offlinevoice.synthesizer.online.Mp3Decoder {
+    <methods>;
+}
+
+-keep class com.qq.wx.offlinevoice.synthesizer.online.MediaCodecMp3Decoder {
+    <init>(...);
+    <methods>;
+}
+
+# Keep online TTS API implementation
+-keep class com.qq.wx.offlinevoice.synthesizer.online.OnlineTtsApiImp {
+    <init>(...);
+    <methods>;
+}
+
+# Keep token management classes
+-keep class com.qq.wx.offlinevoice.synthesizer.online.token.TokenProvider {
+    <init>(...);
+    <methods>;
+}
+
+-keep class com.qq.wx.offlinevoice.synthesizer.online.token.TokenRemoteDataSource {
+    <init>(...);
+    <methods>;
+}
+
+-keep class com.qq.wx.offlinevoice.synthesizer.online.token.WxTokenManager {
+    <init>(...);
+    <methods>;
+}
+
+# ============ Internal Management Classes (New) ============
+# Keep network monitor for online/offline strategy
+-keep class com.qq.wx.offlinevoice.synthesizer.NetworkMonitor {
+    <init>(...);
+    <fields>;
+    <methods>;
+}
+
+# Keep synthesis strategy manager
+-keep class com.qq.wx.offlinevoice.synthesizer.SynthesisStrategyManager {
+    <init>(...);
+    <fields>;
+    <methods>;
+}
+
+# Keep audio speed processor
+-keep class com.qq.wx.offlinevoice.synthesizer.AudioSpeedProcessor {
+    <init>(...);
     <methods>;
 }
 
