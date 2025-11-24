@@ -23,6 +23,24 @@ class TtsRepository(
     private val mapMutex = Mutex()
     private val scope = CoroutineScope(Dispatchers.IO)
 
+    companion object {
+        /**
+         * 创建一个安全的、固定长度的缓存键。
+         * 使用 SHA-1 算法对组合了所有影响因素的原始字符串进行哈希。
+         */
+        public fun createCacheKey(text: String, speaker: Speaker): String {
+            // 组合所有可能影响音频输出的变量
+            val originalKey = "${speaker.modelName}|$text"
+
+            // 使用 MessageDigest 来进行哈希
+            val digest = MessageDigest.getInstance("SHA-1")
+            val result = digest.digest(originalKey.toByteArray())
+
+            // 将字节数组转换为十六进制字符串
+            return result.joinToString("") { "%02x".format(it) }
+        }
+    }
+
     /**
      * 获取解码后的 PCM 数据。
      * 优先从缓存获取，如果缓存未命中，则根据 allowNetwork 参数决定是否发起网络请求。
@@ -96,21 +114,6 @@ class TtsRepository(
         }
     }
 
-    /**
-     * 创建一个安全的、固定长度的缓存键。
-     * 使用 SHA-1 算法对组合了所有影响因素的原始字符串进行哈希。
-     */
-    private fun createCacheKey(text: String, speaker: Speaker): String {
-        // 组合所有可能影响音频输出的变量
-        val originalKey = "${speaker.modelName}|$text"
-
-        // 使用 MessageDigest 来进行哈希
-        val digest = MessageDigest.getInstance("SHA-1")
-        val result = digest.digest(originalKey.toByteArray())
-
-        // 将字节数组转换为十六进制字符串
-        return result.joinToString("") { "%02x".format(it) }
-    }
 
     fun clearCache() {
         scope.launch {

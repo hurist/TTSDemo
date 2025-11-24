@@ -29,6 +29,7 @@ import kotlin.properties.Delegates
 import kotlin.math.min
 import kotlin.math.pow
 import androidx.core.content.edit
+import com.qq.wx.offlinevoice.synthesizer.cache.TtsCache
 import kotlinx.coroutines.withTimeout
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -290,7 +291,7 @@ class TtsSynthesizer(
         strategyManager = SynthesisStrategyManager(networkMonitor)
         val onlineApi = WxReaderApi(context)
         val mp3Decoder = MediaCodecMp3Decoder(context.applicationContext)
-        val ttsCache = TtsCacheImpl(context.applicationContext)
+        val ttsCache = TtsCache.getInstance(context)
         ttsRepository = TtsRepository(onlineApi, mp3Decoder, ttsCache, networkMonitor)
 
         appScope.launch { commandProcessor() }

@@ -31,7 +31,7 @@ import java.io.IOException
 import com.hurist.ttsdemo.databinding.ActivityMainBinding
 import com.qq.wx.offlinevoice.synthesizer.Level
 import com.qq.wx.offlinevoice.synthesizer.PathUtils
-import com.qq.wx.offlinevoice.synthesizer.online.WxTokenManager
+import com.qq.wx.offlinevoice.synthesizer.online.token.WxTokenManager
 
 /**
  * 主Activity - TTS演示应用

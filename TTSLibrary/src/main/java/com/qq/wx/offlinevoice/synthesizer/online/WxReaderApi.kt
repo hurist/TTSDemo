@@ -19,11 +19,13 @@ import kotlin.coroutines.resumeWithException
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 import com.qq.wx.offlinevoice.synthesizer.AppLogger
+import com.qq.wx.offlinevoice.synthesizer.ErrCode
 import com.qq.wx.offlinevoice.synthesizer.SSLHelper
 import com.qq.wx.offlinevoice.synthesizer.online.token.KEY_TOKEN
 import com.qq.wx.offlinevoice.synthesizer.online.token.TokenProvider
 import com.qq.wx.offlinevoice.synthesizer.online.token.KEY_UID
 import com.qq.wx.offlinevoice.synthesizer.online.token.WX_SP_NAME
+import com.qq.wx.offlinevoice.synthesizer.online.token.WxTokenManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
@@ -136,7 +138,7 @@ class WxReaderApi(private val context: Context) : OnlineTtsApi {
                 }
 
                 // --- 步骤 3: 根据解析结果执行后续操作 ---
-                return when (val apiResponse = parseApiResponse(responseBodyString)) {
+                return when (val apiResponse = parseApiResponse(responseBodyString, text)) {
                     is ApiResponse.DirectAudio -> {
                         AppLogger.d(TAG, "成功获取 Base64 音频数据，长度: ${apiResponse.data.size} 字节")
                         apiResponse.data
@@ -149,7 +151,7 @@ class WxReaderApi(private val context: Context) : OnlineTtsApi {
             } catch (e: WxApiException) {
                 // 专门处理 API 异常，例如 Session 过期
                 val code = e.errorCode
-                if (code == -13 /* Session 过期 */) {
+                if (code == ErrCode.INVALID_TOKEN /* Session 过期 */) {
                     AppLogger.w(TAG, "检测到 token 过期（-13），开始自动刷新。attempt=$attempt, token=${LogMask.maskToken(token)}, uid=${LogMask.maskUid(uid)}", e)
                     if (attempt >= 1) {
                         AppLogger.e(TAG, "刷新后仍出现 -13 或已重试过，停止重试。", e)
@@ -206,7 +208,7 @@ class WxReaderApi(private val context: Context) : OnlineTtsApi {
      * @return 返回 ApiResponse 模型或抛出异常。
      */
     @OptIn(ExperimentalEncodingApi::class)
-    private fun parseApiResponse(responseBody: String): ApiResponse {
+    private fun parseApiResponse(responseBody: String, text: String): ApiResponse {
         val json = JSONObject(responseBody)
         val data = json.optString("audio_data", "")
         val audioUrl = json.optString("audio_url", "")
@@ -226,7 +228,7 @@ class WxReaderApi(private val context: Context) : OnlineTtsApi {
                 val errCode = baseResponse?.optInt("ret", -1) ?: -1
                 AppLogger.w(
                     TAG,
-                    "API 返回错误，代码: $errCode, 信息: $errMsg, 响应: $responseBody, token: ${LogMask.maskToken(token)}, uid: ${LogMask.maskUid(uid)}"
+                    "API 返回错误，代码: $errCode, 信息: $errMsg, 响应: $responseBody, token: ${LogMask.maskToken(token)}, uid: ${LogMask.maskUid(uid)}, text: ${text.take(20)}..."
                 )
                 throw WxApiException(errCode, errMsg)
             }

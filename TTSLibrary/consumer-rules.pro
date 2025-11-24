@@ -188,6 +188,27 @@
     public static final ** CREATOR;
 }
 
+# 1. 保留 PreloadManager 类及其公共实例方法
+-keep public class com.qq.wx.offlinevoice.synthesizer.preload.PreloadManager {
+    # 注意：这里不再包含 static 方法的规则
+    public void preload(...);
+    public void cancel(...);
+    public void cancelAll();
+}
+
+# 2. 明确保留 Companion 对象及其公共方法
+# 这是对您问题的直接修正
+-keep public class com.qq.wx.offlinevoice.synthesizer.preload.PreloadManager$Companion {
+    public com.qq.wx.offlinevoice.synthesizer.preload.PreloadManager getInstance(android.content.Context);
+    public void initialize(android.content.Context, com.qq.wx.offlinevoice.synthesizer.preload.PreloadManager$Config);
+}
+
+# 3. 保留 Config 数据类
+-keep public class com.qq.wx.offlinevoice.synthesizer.preload.PreloadManager$Config {
+    public <init>(...);
+    public *;
+}
+
 # ============ General Android ============
 # Keep custom view constructors
 -keepclassmembers class * extends android.view.View {

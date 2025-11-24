@@ -1,13 +1,9 @@
-package com.qq.wx.offlinevoice.synthesizer.online
+package com.qq.wx.offlinevoice.synthesizer.online.token
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.os.Looper
 import com.qq.wx.offlinevoice.synthesizer.AppLogger
-import com.qq.wx.offlinevoice.synthesizer.online.token.TokenProvider
-import com.qq.wx.offlinevoice.synthesizer.online.token.TokenUid
-import com.qq.wx.offlinevoice.synthesizer.online.token.WX_SP_NAME
-import kotlinx.coroutines.runBlocking
+import com.qq.wx.offlinevoice.synthesizer.online.LogMask
 import okhttp3.OkHttpClient
 import java.util.concurrent.TimeUnit
 

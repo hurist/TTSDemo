@@ -9,6 +9,9 @@ import com.qq.wx.offlinevoice.synthesizer.AppLogger
 import com.qq.wx.offlinevoice.synthesizer.DecodedPcm
 import java.io.File
 import java.io.IOException
+import java.util.UUID
+import kotlin.uuid.ExperimentalUuidApi
+import kotlin.uuid.Uuid
 
 class MediaCodecMp3Decoder(private val context: Context) : Mp3Decoder {
 
@@ -17,6 +20,7 @@ class MediaCodecMp3Decoder(private val context: Context) : Mp3Decoder {
         private const val TIMEOUT_US = 10000L
     }
 
+    @OptIn(ExperimentalUuidApi::class)
     override fun decode(mp3Data: ByteArray): DecodedPcm {
         var decoder: MediaCodec? = null
         var extractor: MediaExtractor? = null
@@ -27,7 +31,9 @@ class MediaCodecMp3Decoder(private val context: Context) : Mp3Decoder {
         var actualSampleRate = -1 // 用于存储真实的采样率
 
         try {
-            tempMp3File = File.createTempFile("temp_tts_audio", ".mp3", context.cacheDir)
+            val random = UUID.randomUUID().toString()
+            val randomFilename = "temp_tts_${random}"
+            tempMp3File = File.createTempFile(randomFilename, ".mp3", context.cacheDir)
             tempMp3File.writeBytes(mp3Data)
             AppLogger.d(TAG, "MP3数据已写入临时文件: ${tempMp3File.absolutePath}")
 
