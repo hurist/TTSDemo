@@ -60,38 +60,32 @@
 
 # 3.1 播放状态枚举
 -keep public enum com.qq.wx.offlinevoice.synthesizer.TtsPlaybackState {
-    **[] $VALUES;
-    public *;
+     *;
 }
 
 # 3.2 TTS 策略枚举
 -keep public enum com.qq.wx.offlinevoice.synthesizer.TtsStrategy {
-    **[] $VALUES;
-    public *;
+     *;
 }
 
 # 3.3 合成模式枚举
 -keep public enum com.qq.wx.offlinevoice.synthesizer.SynthesisMode {
-    **[] $VALUES;
-    public *;
+     *;
 }
 
 # 3.4 句子分割策略枚举
 -keep public enum com.qq.wx.offlinevoice.synthesizer.SentenceSplitterStrategy {
-    **[] $VALUES;
-    public *;
+     *;
 }
 
 # 3.5 日志级别枚举（用于回调）
 -keep public enum com.qq.wx.offlinevoice.synthesizer.Level {
-    **[] $VALUES;
-    public *;
+     *;
 }
 
 # 3.6 Speaker 枚举（发音人配置）
 -keep public enum com.qq.wx.offlinevoice.synthesizer.Speaker {
-    **[] $VALUES;
-    public *;
+     *;
 }
 
 # -----------------------------------------------------------------------------
