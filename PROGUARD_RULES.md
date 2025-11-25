@@ -1,74 +1,87 @@
 # TTSLibrary ProGuard/R8 混淆规则说明
 
-本文档说明了为 TTSLibrary 添加的 ProGuard/R8 混淆规则。
+本文档说明了为 TTSLibrary 配置的 ProGuard/R8 混淆规则。
 
-## 最近更新 (2025-11-21)
+## 最近更新 (2025-11-25)
 
-根据最近的代码重构和功能增强，已更新 ProGuard 规则以包含：
-- ✅ 新增枚举类：`SynthesisMode`、`Level`
-- ✅ 新增数据类：`DecodedPcm`（添加到 consumer-rules.pro）
-- ✅ 缓存模块：`TtsCache` 接口和 `TtsCacheImpl` 实现
-- ✅ 在线TTS模块：MP3解码器、Token管理类
-- ✅ 策略管理：`NetworkMonitor`、`SynthesisStrategyManager`
-- ✅ Kotlin Flow 支持：`StateFlow` 和 `MutableStateFlow`
-- ✅ 音频处理：`AudioSpeedProcessor`
-
-这些更新确保所有新增的公共API、回调接口和内部实现类都能正确工作，不会被混淆破坏。
+重新整理和完善了整个混淆配置：
+- ✅ 重组规则结构，按功能分类，增强可读性和可维护性
+- ✅ 完善公共 API 保护：`TtsSynthesizer`、`TtsCallback`、`PreloadManager`
+- ✅ 完善枚举类保护：`TtsPlaybackState`、`TtsStrategy`、`SynthesisMode`、`SentenceSplitterStrategy`、`Level`、`Speaker`
+- ✅ 完善数据类保护：`TtsStatus`、`DecodedPcm`、`AppLoggerConfig`、`PreloadManager.Config`
+- ✅ 加强 JNI 本地方法保护：`SynthesizerNative` 及所有 native 方法
+- ✅ 完善内部实现类保护：音频处理、缓存、网络监控、在线 TTS 等模块
+- ✅ 优化 Kotlin 特性支持：协程、StateFlow、密封类、数据类解构
+- ✅ 更新第三方依赖规则：OkHttp、Kotlin Coroutines
+- ✅ 添加序列化支持规则
 
 ## 文件说明
 
-### 1. `consumer-rules.pro`
+### 1. `TTSLibrary/consumer-rules.pro`
 此文件包含**库使用者规则**，当其他应用或模块依赖 TTSLibrary 时自动应用。这些规则确保：
-- 公共 API 不被混淆
+- 公共 API 不被混淆（`TtsSynthesizer`、`TtsCallback`、`PreloadManager`）
 - 回调接口能正常工作
-- 数据类保持序列化兼容性
+- 数据类保持完整性（解构、复制功能）
+- 枚举类正确工作
 - JNI 本地方法正确映射
 
-### 2. `proguard-rules.pro`
-此文件包含**库内部规则**，在构建 TTSLibrary 本身时使用。包含更详细的内部实现保护规则。
+### 2. `TTSLibrary/proguard-rules.pro`
+此文件包含**库内部规则**，在构建 TTSLibrary 本身时使用。包含：
+- 调试信息保留
+- JNI 本地方法的详细保护
+- 第三方依赖规则（OkHttp、Kotlin Coroutines）
+- 内部实现类保护
+- R8 优化设置
+
+### 3. `app/proguard-rules.pro`
+此文件包含**应用规则**，仅用于 TTSDemo 应用。内容精简，因为 TTSLibrary 的规则会通过 consumer-rules.pro 自动应用。
 
 ## 保护的关键组件
 
 ### 公共 API 类
-- `TtsSynthesizer` - 主要的 TTS 合成器类，保留所有公共方法
-- `TtsCallback` - 回调接口，保留所有方法以确保回调正常触发
-- `Speaker` - 语音配置数据类
-- `TtsStatus` - TTS 状态数据类
+| 类名 | 说明 |
+|------|------|
+| `TtsSynthesizer` | 主要的 TTS 合成器类 |
+| `TtsCallback` | 回调接口 |
+| `PreloadManager` | 预加载管理器 |
+| `PreloadManager.Config` | 预加载配置 |
+| `TtsStatus` | TTS 状态数据类 |
+| `DecodedPcm` | 解码后的 PCM 数据类 |
+| `AppLoggerConfig` | 日志配置类 |
 
 ### 枚举类
-- `TtsPlaybackState` - 播放状态枚举
-- `TtsStrategy` - TTS 策略枚举
-- `SynthesisMode` - 合成模式枚举（在SynthesisStrategyManager中定义）
-- `SentenceSplitterStrategy` - 句子分割策略枚举
-- `Level` - 日志级别枚举（在AppLogger中定义，TtsCallback使用）
+| 枚举名 | 说明 |
+|--------|------|
+| `TtsPlaybackState` | 播放状态（IDLE, PLAYING, PAUSED, BUFFERING） |
+| `TtsStrategy` | TTS 策略（OFFLINE_ONLY, ONLINE_PREFERRED, ONLINE_ONLY） |
+| `SynthesisMode` | 合成模式（ONLINE, OFFLINE） |
+| `SentenceSplitterStrategy` | 句子分割策略 |
+| `Level` | 日志级别 |
+| `Speaker` | 发音人配置 |
 
 ### JNI 本地方法
-- `SynthesizerNative` - 包含本地方法的类，必须保留以确保 JNI 调用正常工作
-- 所有 `native` 方法签名都被保留
+| 类名 | 说明 |
+|------|------|
+| `SynthesizerNative` | 包含本地方法的类，必须保留以确保 JNI 调用正常工作 |
 
-### 依赖库规则
-- **Kotlin Coroutines** - 保留协程相关类和 volatile 字段
-- **Kotlin Flow** - 保留 StateFlow 和 MutableStateFlow 相关方法（用于网络监控等）
-- **OkHttp** - 添加标准 OkHttp ProGuard 规则
-- **Kotlin 元数据** - 保留 Kotlin 反射所需的元数据
+### 内部实现类
+| 模块 | 类名 |
+|------|------|
+| 音频处理 | `AudioPlayer`、`AudioSpeedProcessor`、`Sonic` |
+| 缓存 | `TtsCache`、`TtsCacheImpl` |
+| 网络 | `NetworkMonitor` |
+| 策略 | `SynthesisStrategyManager` |
+| 在线TTS | `OnlineTtsApi`、`WxReaderApi`、`Mp3Decoder`、`MediaCodecMp3Decoder` |
+| Token管理 | `TokenProvider`、`WxTokenManager`、`TokenRemoteDataSource` |
+| 数据仓库 | `TtsRepository` |
+| 工具类 | `PathUtils`、`SentenceSplitter`、`SSLHelper` |
 
-### 新增模块（最近代码变更）
-- **缓存模块** - TtsCache 接口和 TtsCacheImpl 实现类
-- **在线TTS模块** - Mp3Decoder、MediaCodecMp3Decoder、OnlineTtsApiImp、Token管理类
-- **策略管理** - NetworkMonitor、SynthesisStrategyManager
-- **音频处理** - AudioSpeedProcessor
-
-### 数据类特性
-- `component*()` 方法 - Kotlin 数据类解构
-- `copy()` 方法 - 数据类复制功能
-- 伴生对象（Companion objects）
-
-## 规则分类
+## 规则分类说明
 
 ### 1. Keep 规则
 保留不应被混淆或删除的类、方法和字段：
 ```proguard
--keep class com.qq.wx.offlinevoice.synthesizer.TtsSynthesizer {
+-keep public class com.qq.wx.offlinevoice.synthesizer.TtsSynthesizer {
     public <init>(...);
     public <methods>;
 }
@@ -98,9 +111,11 @@
 
 ## 测试建议
 
-构建 Release 版本时启用 ProGuard/R8：
+### 启用混淆构建
+
+在 `build.gradle.kts` 中启用混淆：
 ```kotlin
-// build.gradle.kts
+// TTSLibrary/build.gradle.kts
 buildTypes {
     release {
         isMinifyEnabled = true
@@ -118,6 +133,8 @@ buildTypes {
 3. 验证公共 API 未被混淆
 4. 测试 JNI 调用正常工作
 5. 验证回调接口正常触发
+6. 测试所有枚举值可正常使用
+7. 验证数据类的解构和复制功能
 
 ## 常见问题
 
@@ -139,10 +156,13 @@ A:
 3. 运行集成测试确保功能正常
 4. 检查 APK 大小和方法数是否合理减少
 
+### Q: 为什么保留了 StateFlow 和协程相关类？
+A: `TtsSynthesizer` 使用 `StateFlow` 暴露 `isPlaying` 状态，`NetworkMonitor` 使用 `StateFlow` 暴露网络状态。这些需要在运行时保持正确的类型信息。
+
 ## 维护建议
 
-1. **添加新的公共 API 时**：更新 keep 规则保护新的公共类和方法
-2. **添加新的依赖库时**：检查是否需要添加对应的 ProGuard 规则
+1. **添加新的公共 API 时**：更新 `consumer-rules.pro` 保护新的公共类和方法
+2. **添加新的依赖库时**：检查是否需要在 `proguard-rules.pro` 添加对应的规则
 3. **修改数据类时**：确保序列化相关的字段被保留
 4. **定期测试**：在 CI/CD 中定期运行混淆构建并测试
 
@@ -151,3 +171,4 @@ A:
 - [Android ProGuard 官方文档](https://developer.android.com/studio/build/shrink-code)
 - [R8 优化指南](https://developer.android.com/studio/build/shrink-code#optimization)
 - [ProGuard 规则语法](https://www.guardsquare.com/manual/configuration/usage)
+- [Kotlin 混淆最佳实践](https://kotlinlang.org/docs/native-binary.html#configure-obfuscation)

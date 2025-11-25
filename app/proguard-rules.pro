@@ -1,114 +1,107 @@
-# Add project specific ProGuard rules here.
-# You can control the set of applied configuration files using the
-# proguardFiles setting in build.gradle.
+# =============================================================================
+# TTSDemo App ProGuard Rules
 #
-# For more details, see
-#   http://developer.android.com/guide/developing/tools/proguard.html
+# 这些规则用于应用程序本身的混淆配置。
+# TTSLibrary 的规则会通过 consumer-rules.pro 自动应用。
+#
+# 更新日期: 2025-11-25
+# =============================================================================
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
+# -----------------------------------------------------------------------------
+# 第一部分：调试信息保留
+# -----------------------------------------------------------------------------
+
+# 保留源文件名和行号信息，便于崩溃日志分析
+-keepattributes SourceFile,LineNumberTable
+
+# 如果保留了行号信息，可以用此选项隐藏原始源文件名
+#-renamesourcefileattribute SourceFile
+
+# -----------------------------------------------------------------------------
+# 第二部分：Kotlin 相关
+# -----------------------------------------------------------------------------
+
+# 保留 Kotlin 元数据
+-keep class kotlin.Metadata { *; }
+
+# 保留 Kotlin 协程相关类
+-keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}
+-keepnames class kotlinx.coroutines.CoroutineExceptionHandler {}
+-keepnames class kotlinx.coroutines.android.AndroidDispatcherFactory {}
+-keepclassmembers class kotlinx.coroutines.** {
+    volatile <fields>;
+}
+
+# -----------------------------------------------------------------------------
+# 第三部分：OkHttp 规则
+# -----------------------------------------------------------------------------
+
+# OkHttp 警告抑制
+-dontwarn okhttp3.**
+-dontwarn okio.**
+-dontwarn javax.annotation.**
+-dontwarn org.conscrypt.**
+-dontwarn org.bouncycastle.**
+-dontwarn org.openjsse.**
+
+# 保留 OkHttp 平台相关类
+-keepnames class okhttp3.internal.platform.** { *; }
+
+# -----------------------------------------------------------------------------
+# 第四部分：Guava 规则（如果使用）
+# -----------------------------------------------------------------------------
+
+# Guava 相关警告抑制
+-dontwarn com.google.errorprone.annotations.**
+-dontwarn sun.misc.Unsafe
+-dontwarn java.lang.ClassValue
+-dontwarn org.codehaus.mojo.animal_sniffer.IgnoreJRERequirement
+-dontwarn javax.lang.model.element.Modifier
+-dontwarn afu.org.checkerframework.**
+-dontwarn org.checkerframework.**
+
+# -----------------------------------------------------------------------------
+# 第五部分：WebView JavaScript 接口（如需要）
+# -----------------------------------------------------------------------------
+
+# 如果项目使用 WebView 并且有 JavaScript 接口，取消下面的注释
+# 并指定 JavaScript 接口类的完整类名
 #-keepclassmembers class fqcn.of.javascript.interface.for.webview {
 #   public *;
 #}
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# -----------------------------------------------------------------------------
+# 第六部分：序列化支持
+# -----------------------------------------------------------------------------
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
-
-# ==============================================================================
-# ProGuard Rules for TTSLibrary (com.qq.wx.offlinevoice.synthesizer)
-# ==============================================================================
-
-# Keep native methods - Critical for JNI functionality
--keepclasseswithmembernames class com.qq.wx.offlinevoice.synthesizer.SynthesizerNative {
-    native <methods>;
+# 保留 Serializable 类的序列化方法
+-keepclassmembers class * implements java.io.Serializable {
+    static final long serialVersionUID;
+    private static final java.io.ObjectStreamField[] serialPersistentFields;
+    !static !transient <fields>;
+    private void writeObject(java.io.ObjectOutputStream);
+    private void readObject(java.io.ObjectInputStream);
+    java.lang.Object writeReplace();
+    java.lang.Object readResolve();
 }
 
-# Keep all members of SynthesizerNative as they are called from native code
--keep class com.qq.wx.offlinevoice.synthesizer.SynthesizerNative {
-    public <methods>;
-    public <fields>;
+# 保留 Parcelable CREATOR
+-keepclassmembers class * implements android.os.Parcelable {
+    public static final android.os.Parcelable$Creator CREATOR;
 }
 
-# Keep the main TTS synthesizer public API
--keep public class com.qq.wx.offlinevoice.synthesizer.TtsSynthesizer {
-    public <init>(...);
-    public <methods>;
-    public <fields>;
-}
+# -----------------------------------------------------------------------------
+# 第七部分：通用属性保留
+# -----------------------------------------------------------------------------
 
-# Keep callback interface - All methods must be preserved for user implementations
--keep interface com.qq.wx.offlinevoice.synthesizer.TtsCallback {
-    <methods>;
-}
+# 保留注解信息
+-keepattributes *Annotation*
 
-# Keep all implementations of TtsCallback
--keep class * implements com.qq.wx.offlinevoice.synthesizer.TtsCallback {
-    <methods>;
-}
+# 保留签名信息（用于泛型）
+-keepattributes Signature
 
-# Keep data classes and their members - Used in public API
--keep class com.qq.wx.offlinevoice.synthesizer.TtsStatus {
-    public <init>(...);
-    public <methods>;
-    public <fields>;
-}
+# 保留内部类信息
+-keepattributes InnerClasses,EnclosingMethod
 
-# Keep enum class - Used in public API
--keep enum com.qq.wx.offlinevoice.synthesizer.TtsPlaybackState {
-    **[] $VALUES;
-    public *;
-}
-
-# Keep constants object
--keep class com.qq.wx.offlinevoice.synthesizer.TtsConstants {
-    public static final <fields>;
-}
-
-# Keep utility classes that might be accessed reflectively or from native code
--keep class com.qq.wx.offlinevoice.synthesizer.PathUtils {
-    public <methods>;
-}
-
--keep class com.qq.wx.offlinevoice.synthesizer.XorDecoder {
-    public <methods>;
-}
-
-# Keep AudioPlayer - Important for audio playback functionality
--keep class com.qq.wx.offlinevoice.synthesizer.AudioPlayer {
-    public <init>(...);
-    public <methods>;
-}
-
-# Keep SentenceSplitter - Used by TtsSynthesizer
--keep class com.qq.wx.offlinevoice.synthesizer.SentenceSplitter {
-    public static <methods>;
-}
-
-# Preserve annotations for the synthesizer package
--keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod
-
-# Keep Kotlin metadata for the synthesizer package to ensure proper Kotlin functionality
--keep class com.qq.wx.offlinevoice.synthesizer.**$Companion { *; }
--keep class com.qq.wx.offlinevoice.synthesizer.**$WhenMappings { *; }
-
-# Keep sealed classes and their subclasses (used in TtsSynthesizer)
--keep class com.qq.wx.offlinevoice.synthesizer.TtsSynthesizer$Command { *; }
--keep class com.qq.wx.offlinevoice.synthesizer.TtsSynthesizer$Command$* { *; }
-
-# Keep AudioPlayer internal queue items
--keep class com.qq.wx.offlinevoice.synthesizer.AudioPlayer$QueueItem { *; }
--keep class com.qq.wx.offlinevoice.synthesizer.AudioPlayer$QueueItem$* { *; }
-
-# Preserve StateFlow and coroutine-related members
--keepclassmembers class com.qq.wx.offlinevoice.synthesizer.TtsSynthesizer {
-    kotlinx.coroutines.flow.StateFlow isPlaying;
-}
-
-# Don't warn about missing classes from optional dependencies
--dontwarn com.qq.wx.offlinevoice.synthesizer.**
+# 保留异常信息
+-keepattributes Exceptions
