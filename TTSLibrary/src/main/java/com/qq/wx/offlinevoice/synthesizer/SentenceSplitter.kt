@@ -7,19 +7,26 @@ import java.util.regex.Pattern
  * 支持换行、句末标点、停顿标点、分隔标点等多层分割规则。
  *
  * 更新：
- * - sentenceSplitList 与 sentenceSplitListByLine 直接返回 TtsSynthesizer.TtsBag 列表。
- * - sentenceSplitListByLine 增加长度约束：每个 TtsBag 最多 250 字。
- *   规则（简化版）：
- *     > 当某一行超过 250 字：
- *       1) 从第 250 个字符往前寻找最近的标点（句末/停顿/分隔标点）。
- *       2) 若找到，则在该标点“之后”截断（包含标点）。
- *       3) 若未找到任何标点，则直接在 250 处截断。
- *       4) 继续处理剩余部分，重复上述逻辑，直到剩余长度 ≤ 250。
+ * - sentenceSplitList 和 sentenceSplitListByLine 均支持长度约束和 beginPos 精准切分。
+ * - 核心逻辑被重构为可复用的私有函数，以减少代码重复。
  */
 object SentenceSplitter {
 
+    // 为了清晰，将 BagRange 重命名为 GroupRange，代表一个初始分组（如一行或一个完整句子）
+    private data class GroupRange(val start: Int, val end: Int, val level: Int, val flag: Boolean)
+
+    // Piece 代表从 GroupRange 中切分出的最终小片段
+    private data class Piece(
+        val start: Int,
+        val end: Int,
+        val originalGroupId: Int,
+        var partInGroup: Int, // var for re-numbering after beginPos split
+        val groupStart: Int,
+        val groupEnd: Int
+    )
+
     /** 正则配置类型 */
-    enum class RegexConfig(val regex: String) {
+    private enum class RegexConfig(val regex: String) {
         /** 换行分割 */
         LineBreak("[\r\n]+"),
 
@@ -33,39 +40,48 @@ object SentenceSplitter {
         SeparationPunctuation("[、]+");
     }
 
+    // 提取出所有用于切分的标点集合
+    private val PUNCTUATION_SET = hashSetOf(
+        '。', '?', '？', '!', '！', '…',
+        '.',
+        ',', '，', ';', '；', ':', '：',
+        '、'
+    )
+
     /**
-     * 根据正则拆分字符串，返回对应的 BagRange 列表。
+     * 根据正则拆分字符串，返回对应的 GroupRange 列表。
      */
     private fun textToIndexList(
         text: String,
         offset: Int,
         config: RegexConfig
-    ): List<BagRange> {
-        val list = mutableListOf<BagRange>()
+    ): List<GroupRange> {
+        val list = mutableListOf<GroupRange>()
         val matcher = Pattern.compile(config.regex).matcher(text)
         var lastEnd = 0
         while (matcher.find()) {
             val end = matcher.end()
-            list.add(BagRange(lastEnd + offset, end + offset, config.ordinal, false))
+            list.add(GroupRange(lastEnd + offset, end + offset, config.ordinal, false))
             lastEnd = end
         }
         if (lastEnd != text.length) {
-            list.add(BagRange(lastEnd + offset, text.length + offset, config.ordinal, false))
+            list.add(GroupRange(lastEnd + offset, text.length + offset, config.ordinal, false))
         }
         return list
     }
 
     /**
-     * 对一批 BagRange 再按指定正则进行细分。
+     * 对一批 GroupRange 再按指定正则进行细分。
      */
     private fun toSplit(
-        ranges: List<BagRange>,
+        ranges: List<GroupRange>,
         text: String,
         config: RegexConfig
-    ): List<BagRange> {
-        val result = mutableListOf<BagRange>()
+    ): List<GroupRange> {
+        val result = mutableListOf<GroupRange>()
         for (range in ranges) {
             val segment = safeSubstring(text, range.start, range.end)
+            // 长度判断可以移除或调整，这里为保持原逻辑暂时保留
             val splitList = if (segment.length >= 10) {
                 textToIndexList(segment, range.start, config)
             } else {
@@ -76,143 +92,137 @@ object SentenceSplitter {
         return result
     }
 
-    fun sentenceSplit(text: String): List<BagRange> {
-        var result = listOf(BagRange(0, text.length, 0, false))
-        result = toSplit(result, text, RegexConfig.LineBreak)
-        result = toSplit(result, text, RegexConfig.BreakPunctuation)
-        result = toSplit(result, text, RegexConfig.EndPunctuation)
-        result = toSplit(result, text, RegexConfig.SeparationPunctuation)
-        return result
-    }
-
     /**
-     * 仅按句号/问号/感叹号拆分（不含逗号等）。
+     * [重构] 核心步骤1: 将初始分组按最大长度切分为片段(Piece)
      */
-    fun sentenceSplitByPeriod(text: String): List<BagRange> {
-        var result = listOf(BagRange(0, text.length, 0, false))
-        result = toSplit(result, text, RegexConfig.LineBreak)
-        result = toSplit(result, text, RegexConfig.BreakPunctuation)
-        return result
-    }
-
-    /**
-     * 基于“句末标点”切分，返回 TtsBag 列表。
-     * 这里每一个片段视作一行（无换行场景），originalGroupId=idx，partInGroup=0。
-     */
-    fun sentenceSplitList(text: String): List<TtsSynthesizer.TtsBag> {
-        val ranges = sentenceSplitByPeriod(text)
-        val bags = ArrayList<TtsSynthesizer.TtsBag>(ranges.size)
-        ranges.forEachIndexed { idx, r ->
-            val segment = safeSubstring(text, r.start, r.end)
-            bags.add(
-                TtsSynthesizer.TtsBag(
-                    text = segment,
-                    index = idx,
-                    utteranceId = "utt_$idx",
-                    start = r.start,
-                    end = r.end,
-                    originalGroupId = idx,
-                    partInGroup = 0,
-                    groupStart = r.start,
-                    groupEnd = r.end
-                )
-            )
-        }
-        return bags
-    }
-
-    /**
-     * 先按换行分割，再对每行应用“最多 250 字”的切分规则，返回物理段列表（TtsBag）。
-     * 超长行拆分：从 250 处向前寻找最近标点（句末/停顿/分隔），若找到则切在标点之后；否则硬切 250。
-     * 所有分段保留行元数据 originalGroupId / partInGroup / groupStart / groupEnd。
-     *
-     * 新增：beginPos (可选)
-     * 若 beginPos 位于最终某一分段的内部 (start < beginPos < end)，则将该分段在 beginPos 处分裂为两段：
-     *   左段 [start, beginPos)，右段 [beginPos, end)
-     * “标点归右”自然满足（标点字符位于 beginPos 位置时落入右段）。
-     */
-    fun sentenceSplitListByLine(text: String, beginPos: Int? = null): List<TtsSynthesizer.TtsBag> {
-        val MAX_LEN = 150
-        val lineRanges = toSplit(listOf(BagRange(0, text.length, 0, false)), text, RegexConfig.LineBreak)
-
-        val punctuationSet = hashSetOf(
-            '。','?','？','!','！','…',
-            '.',
-            ',','，',';','；',':','：',
-            '、'
-        )
-
-        data class Piece(val start: Int, val end: Int, val lineId: Int, val part: Int, val lineStart: Int, val lineEnd: Int)
-
+    private fun chunkGroupsByLength(
+        groups: List<GroupRange>,
+        text: String,
+        maxLength: Int
+    ): MutableList<Piece> {
         val pieces = mutableListOf<Piece>()
-        lineRanges.forEachIndexed { lineIdx, r ->
-            var curStart = r.start
-            val lineEnd = r.end
+        groups.forEachIndexed { groupId, group ->
+            var currentStart = group.start
+            val groupEnd = group.end
             var part = 0
-            while (lineEnd - curStart > MAX_LEN) {
-                val tentativeCut = curStart + MAX_LEN
-                var cut = -1
-                var i = tentativeCut - 1
-                while (i >= curStart) {
-                    val c = text.getOrNull(i)
-                    if (c != null && c in punctuationSet) { cut = i + 1; break }
-                    i--
-                }
-                if (cut == -1) cut = tentativeCut
-                pieces += Piece(curStart, cut, lineIdx, part, r.start, r.end)
-                curStart = cut
-                part++
-            }
-            if (curStart < lineEnd) {
-                pieces += Piece(curStart, lineEnd, lineIdx, part, r.start, r.end)
-            }
-        }
-
-        // beginPos 二次拆分（后处理）
-        if (beginPos != null && beginPos > 0 && beginPos < text.length) {
-            val targetIndex = pieces.indexOfFirst { it.start < beginPos && beginPos < it.end }
-            if (targetIndex >= 0) {
-                val target = pieces[targetIndex]
-                // 拆分为两段，标点归右：左段不包含 beginPos 位置字符
-                val left = Piece(target.start, beginPos, target.lineId, target.part, target.lineStart, target.lineEnd)
-                val right = Piece(beginPos, target.end, target.lineId, target.part + 1, target.lineStart, target.lineEnd)
-
-                // 替换原目标段
-                pieces.removeAt(targetIndex)
-                pieces.add(targetIndex, right)
-                pieces.add(targetIndex, left)
-
-                // 重新计算该行内的 part 序号（保持从 0 递增）
-                val lineId = target.lineId
-                var p = 0
-                for (i in pieces.indices) {
-                    val piece = pieces[i]
-                    if (piece.lineId == lineId) {
-                        pieces[i] = piece.copy(part = p)
-                        p++
+            while (groupEnd - currentStart > maxLength) {
+                // 从 maxLength 处向前找标点
+                val tentativeCut = currentStart + maxLength
+                var cutPosition = -1
+                for (i in tentativeCut - 1 downTo currentStart) {
+                    if (text.getOrNull(i) in PUNCTUATION_SET) {
+                        cutPosition = i + 1 // 切在标点之后
+                        break
                     }
                 }
+                // 如果找不到标点，则硬切
+                if (cutPosition == -1) {
+                    cutPosition = tentativeCut
+                }
+                pieces.add(Piece(currentStart, cutPosition, groupId, part, group.start, group.end))
+                currentStart = cutPosition
+                part++
+            }
+            // 添加剩余的部分
+            if (currentStart < groupEnd) {
+                pieces.add(Piece(currentStart, groupEnd, groupId, part, group.start, group.end))
             }
         }
+        return pieces
+    }
 
+    /**
+     * [重构] 核心步骤2: 在片段列表中应用 beginPos 切分
+     */
+    private fun applyBeginPosSplit(
+        pieces: MutableList<Piece>,
+        beginPos: Int?,
+        textLength: Int
+    ) {
+        if (beginPos == null || beginPos <= 0 || beginPos >= textLength) return
+
+        val targetIndex = pieces.indexOfFirst { it.start < beginPos && beginPos < it.end }
+        if (targetIndex != -1) {
+            val target = pieces[targetIndex]
+            val left = Piece(target.start, beginPos, target.originalGroupId, target.partInGroup, target.groupStart, target.groupEnd)
+            val right = Piece(beginPos, target.end, target.originalGroupId, target.partInGroup + 1, target.groupStart, target.groupEnd)
+
+            pieces.removeAt(targetIndex)
+            pieces.add(targetIndex, right)
+            pieces.add(targetIndex, left)
+
+            // 重新计算该分组内的 part 序号，确保从 0 连续递增
+            val groupId = target.originalGroupId
+            var currentPart = 0
+            for (i in pieces.indices) {
+                if (pieces[i].originalGroupId == groupId) {
+                    pieces[i] = pieces[i].copy(partInGroup = currentPart)
+                    currentPart++
+                }
+            }
+        }
+    }
+
+    /**
+     * [重构] 核心步骤3: 将最终的片段(Piece)列表转换为 TtsBag 列表
+     */
+    private fun piecesToTtsBags(pieces: List<Piece>, text: String): List<TtsSynthesizer.TtsBag> {
         val bags = ArrayList<TtsSynthesizer.TtsBag>(pieces.size)
-        pieces.forEachIndexed { segIdx, p ->
-            val segment = safeSubstring(text, p.start, p.end)
+        pieces.forEachIndexed { finalIndex, piece ->
+            val segment = safeSubstring(text, piece.start, piece.end)
             bags.add(
                 TtsSynthesizer.TtsBag(
                     text = segment,
-                    index = segIdx,
-                    utteranceId = "utt_$segIdx",
-                    start = p.start,
-                    end = p.end,
-                    originalGroupId = p.lineId,
-                    partInGroup = p.part,
-                    groupStart = p.lineStart,
-                    groupEnd = p.lineEnd
+                    index = finalIndex,
+                    utteranceId = "utt_$finalIndex",
+                    start = piece.start,
+                    end = piece.end,
+                    originalGroupId = piece.originalGroupId,
+                    partInGroup = piece.partInGroup,
+                    groupStart = piece.groupStart,
+                    groupEnd = piece.groupEnd
                 )
             )
         }
         return bags
+    }
+
+    /**
+     * 基于“句末标点”切分，并应用长度约束和 beginPos 切分。
+     */
+    fun sentenceSplitList(text: String, beginPos: Int? = null): List<TtsSynthesizer.TtsBag> {
+        val maxLength = 150
+        // 1. 获取初始分组（按句末标点）
+        var initialGroups = listOf(GroupRange(0, text.length, 0, false))
+        initialGroups = toSplit(initialGroups, text, RegexConfig.LineBreak)
+        initialGroups = toSplit(initialGroups, text, RegexConfig.BreakPunctuation)
+
+        // 2. 按长度切分分组
+        val pieces = chunkGroupsByLength(initialGroups, text, maxLength)
+
+        // 3. 应用 beginPos 切分
+        applyBeginPosSplit(pieces, beginPos, text.length)
+
+        // 4. 生成最终结果
+        return piecesToTtsBags(pieces, text)
+    }
+
+    /**
+     * 先按换行分割，再对每行应用长度约束和 beginPos 切分。
+     */
+    fun sentenceSplitListByLine(text: String, beginPos: Int? = null): List<TtsSynthesizer.TtsBag> {
+        val maxLength = 150
+        // 1. 获取初始分组（按换行）
+        val initialGroups = toSplit(listOf(GroupRange(0, text.length, 0, false)), text, RegexConfig.LineBreak)
+
+        // 2. 按长度切分分组
+        val pieces = chunkGroupsByLength(initialGroups, text, maxLength)
+
+        // 3. 应用 beginPos 切分
+        applyBeginPosSplit(pieces, beginPos, text.length)
+
+        // 4. 生成最终结果
+        return piecesToTtsBags(pieces, text)
     }
 
     private fun safeSubstring(text: String, start: Int, end: Int): String {

@@ -45,8 +45,8 @@ internal class PreloadJob(
 
     init {
         val bags = when (splitterStrategy) {
-            SentenceSplitterStrategy.NEWLINE -> SentenceSplitter.sentenceSplitList(content)
-            SentenceSplitterStrategy.PUNCTUATION -> SentenceSplitter.sentenceSplitListByLine(content)
+            SentenceSplitterStrategy.NEWLINE -> SentenceSplitter.sentenceSplitListByLine(content)
+            SentenceSplitterStrategy.PUNCTUATION -> SentenceSplitter.sentenceSplitList(content)
         }
         pendingBags.addAll(bags.filter { it.text.isOnlyPunctuationAndWhitespace().not() })
     }
