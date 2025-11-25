@@ -119,13 +119,13 @@ internal class PreloadJob(
             .launchIn(scope)
     }
 
-    fun cancel() {
+    fun cancel(reason: String) {
         if (isCancelled.compareAndSet(false, true)) {
-            scope.cancel("PreloadJob was cancelled")
+            scope.cancel("PreloadJob was cancelled, reason: $reason")
             pendingBags.clear()
             // 主动回调一个失败结果，让 Manager 知道是因取消而结束
             onCompletion(Result.failure(CancellationException("Preload job was cancelled by user.")))
-            AppLogger.d(TAG, "预加载任务已取消。text=${content.take(20)}")
+            AppLogger.d(TAG, "预加载任务已取消, 原因：${reason}。text=${content.take(20)}")
         }
     }
 }

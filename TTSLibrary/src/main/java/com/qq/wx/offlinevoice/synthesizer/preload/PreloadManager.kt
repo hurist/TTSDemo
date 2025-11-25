@@ -140,7 +140,7 @@ class PreloadManager private constructor(
     fun cancel(content: String, speaker: Speaker) {
         val id = createCacheKey(content, speaker)
         val jobToCancel = synchronized(jobs) { jobs.remove(id) }
-        jobToCancel?.cancel()
+        jobToCancel?.cancel("手动取消")
         AppLogger.d(TAG, "手动取消预加载任务。key=$id")
     }
 
@@ -150,7 +150,7 @@ class PreloadManager private constructor(
             jobs.clear()
             list
         }
-        jobsToCancel.forEach { it.cancel() }
+        jobsToCancel.forEach { it.cancel("手动取消所有任务") }
         AppLogger.d(TAG, "已取消所有预加载任务。")
     }
 
@@ -161,7 +161,7 @@ class PreloadManager private constructor(
                 // LinkedHashMap 的迭代器会按插入顺序返回元素
                 val oldestKey = jobs.keys.iterator().next()
                 val oldestJob = jobs.remove(oldestKey)
-                oldestJob?.cancel()
+                oldestJob?.cancel("超出预加载任务限制，移除最老任务")
                 AppLogger.d(TAG, "预加载任务超过限制，严格移除最老的任务。key=$oldestKey")
             }
         }
