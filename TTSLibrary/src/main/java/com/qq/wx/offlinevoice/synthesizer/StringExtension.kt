@@ -1,14 +1,8 @@
 package com.qq.wx.offlinevoice.synthesizer
 
 fun String.isOnlyPunctuationAndWhitespace(): Boolean {
-    if (this.isEmpty()) {
-        return true
-    }
+    if (this.isBlank()) return true
 
-    //    \p{P} -> Punctuation (标点)
-    //    \p{S} -> Symbol (符号, 包括数学=,+,<,>等)
-    //    \p{Z} -> Separator (空白分隔符)
-    val regex = Regex("^[\\p{P}\\p{S}\\p{Z}]+$")
-
-    return this.matches(regex)
+    // 只要包含至少一个字母或数字，就不是纯符号
+    return this.none { it.isLetterOrDigit() }
 }

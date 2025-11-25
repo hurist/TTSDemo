@@ -1034,7 +1034,7 @@ class TtsSynthesizer(
 
             val sentence = bag.text
             val trimmed = sentence.trim()
-            if (trimmed.isEmpty() || trimmed.isOnlyPunctuationAndWhitespace()) {
+            if (trimmed.isOnlyPunctuationAndWhitespace()) {
                 AppLogger.w(TAG, "句子 $bag, 无有效内容，跳过在线合成。", important = true)
                 enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.ONLINE) {
                     if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, sentence, SynthesisMode.ONLINE, bag.start, bag.end))
@@ -1143,7 +1143,7 @@ class TtsSynthesizer(
         return nativeEngineLock.withLock {
             try {
                 val trimmed = sentence.trim()
-                if (trimmed.isEmpty() || trimmed.isOnlyPunctuationAndWhitespace()) {
+                if (trimmed.isOnlyPunctuationAndWhitespace()) {
                     AppLogger.w(TAG, "句子 $bag 无有效内容，跳过离线合成。", important = true)
                     return@withLock SynthesisResult.Success
                 }

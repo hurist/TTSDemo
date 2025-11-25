@@ -48,7 +48,7 @@ internal class PreloadJob(
             SentenceSplitterStrategy.NEWLINE -> SentenceSplitter.sentenceSplitList(content)
             SentenceSplitterStrategy.PUNCTUATION -> SentenceSplitter.sentenceSplitListByLine(content)
         }
-        pendingBags.addAll(bags.filter { it.text.isNotBlank() && !it.text.isOnlyPunctuationAndWhitespace() })
+        pendingBags.addAll(bags.filter { it.text.isOnlyPunctuationAndWhitespace().not() })
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -87,7 +87,7 @@ internal class PreloadJob(
                             pendingBags.remove(bag) // 非Token无效的API错误，移除任务
                         }
                         // 网络或API错误，保留在队列中等待重试
-                        AppLogger.e(TAG, "网络/API错误，将保留任务待重试: text=${bag.text.take(20)}, error=${e.message}")
+                        AppLogger.e(TAG, "网络/API错误: text=${bag.text.take(20)}, error=${e.message}")
                     } catch (e: Exception) {
                         // 其他未知异常，也暂时保留，可根据业务调整
                         AppLogger.e(TAG, "未知错误，将保留任务待重试: text=${bag.text.take(20)}, error=${e.message}")
