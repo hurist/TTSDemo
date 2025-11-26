@@ -38,6 +38,7 @@ class PreloadManager private constructor(
          * @param context Application context.
          * @param config 自定义配置。
          */
+        @JvmStatic
         fun initialize(context: Context, config: Config = Config()) {
             synchronized(this) {
                 if (INSTANCE == null) {
@@ -55,6 +56,7 @@ class PreloadManager private constructor(
          * @param context Context.
          * @return PreloadManager 实例。
          */
+        @JvmStatic
         fun getInstance(context: Context): PreloadManager {
             // 双重检查锁定，保证性能和线程安全
             return INSTANCE ?: synchronized(this) {
@@ -102,6 +104,7 @@ class PreloadManager private constructor(
         }.launchIn(scope)
     }
 
+    @JvmOverloads
     fun preload(
         content: String,
         speaker: Speaker,
