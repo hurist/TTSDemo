@@ -973,7 +973,7 @@ class TtsSynthesizer(
                                 AppLogger.w(TAG, "在线路径失败(缓存未命中/无PCM或API错误)，回退至[离线模式]。原因: ${(onlineResult as? SynthesisResult.Failure)?.reason ?: "unknown"}")
                                 val reason = when (onlineResult) {
                                     is SynthesisResult.Failure -> onlineResult.reason
-                                    is SynthesisResult.Skip -> "在线合成跳过"
+                                    is SynthesisResult.Skip -> onlineResult.reason
                                     else -> "未知原因"
                                 }
                                 performOfflineSynthesis(index, bag, callReason = reason)
