@@ -8,5 +8,5 @@ interface Mp3Decoder {
      * @return Decoded PCM data as a ShortArray
      * @throws Exception if decoding fails
      */
-    fun decode(mp3Data: ByteArray): DecodedPcm
+    suspend fun decode(mp3Data: ByteArray): DecodedPcm
 }
