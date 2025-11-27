@@ -9,6 +9,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.security.MessageDigest
 
@@ -55,7 +56,7 @@ class TtsRepository(
         text: String,
         speaker: Speaker,
         allowNetwork: Boolean = true // --- 1. 添加了缺失的 allowNetwork 参数，并提供默认值 ---
-    ): DecodedPcm {
+    ): DecodedPcm = withContext(Dispatchers.IO) {
         val text = text.trim()
         val cacheKey = createCacheKey(text, speaker)
 
@@ -68,7 +69,7 @@ class TtsRepository(
             }.getOrNull()
             if (decoded != null) {
                 AppLogger.d("TtsRepository", "MP3 缓存命中: $cacheKey, text: $text")
-                return decoded
+                return@withContext decoded
             }
         }
 
@@ -99,7 +100,7 @@ class TtsRepository(
                 // 2) 将成功获取并解码的结果存入缓存
                 cache.put(cacheKey, mp3Data)
 
-                return decodedPcm
+                return@withContext decodedPcm
             } catch (e: Exception) {
                 // 在 Repository 层面记录带有上下文的详细日志
                 AppLogger.e("TtsRepository", "获取或解码在线PCM失败: $cacheKey}")
