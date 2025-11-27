@@ -410,6 +410,14 @@ class TtsSynthesizer(
                         // 非最后段：仍需统计 EWMA，但不触发外部 complete 回调
                         onSentenceFinishedForEwma(command.index, command.sentence)
                     }
+                    val nextLine = lineId + 1
+                    val nextSeg = lineFirstSegment.getOrNull(nextLine)
+                    // 若确实有下一行，且仍处于播放态，就为 nextSeg 启动一次“缓冲态预判”的去抖定时器。
+                    // 去抖窗口(LOADING_DEBOUNCE_MS)内若 nextSeg 还未产生任何可播放数据，就切到
+                    // BUFFERING；反之若很快有数据到来，定时器会被取消，不会闪烁。
+                    if (nextSeg != null && currentState == TtsPlaybackState.PLAYING) {
+                        scheduleBufferingIfNeeded(nextSeg)
+                    }
                 }
                 is Command.InternalSynthesisFinished -> { /* no-op */ }
                 is Command.InternalError -> {
