@@ -91,6 +91,11 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        lifecycleScope.launch {
+            WxTokenManager.setTokenFetchUrl("https://api.yqxsapp.com/public/tts")
+            WxTokenManager.setAppId("com.yqreader.app")
+            WxTokenManager.refreshTokenIfNeed(this@MainActivity)
+        }
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
         ViewCompat.setOnApplyWindowInsetsListener(findViewById(R.id.main)) { v, insets ->
@@ -264,7 +269,8 @@ class MainActivity : AppCompatActivity() {
                 totalSentences: Int,
                 mode: SynthesisMode,
                 startPos: Int,
-                endPos: Int
+                endPos: Int,
+                triggerReason: String?
             ) {
                 Log.d(TAG, "开始播放第 $sentenceIndex 句，共 $totalSentences 句")
                 runOnUiThread {
