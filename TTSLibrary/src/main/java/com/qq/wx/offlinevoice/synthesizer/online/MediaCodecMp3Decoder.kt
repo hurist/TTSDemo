@@ -31,6 +31,7 @@ class MediaCodecMp3Decoder(private val context: Context) : Mp3Decoder {
         var actualSampleRate = -1 // 用于存储真实的采样率
 
         try {
+            val startTime = System.currentTimeMillis()
             val random = UUID.randomUUID().toString()
             val randomFilename = "temp_tts_${random}"
             tempMp3File = File.createTempFile(randomFilename, ".mp3", context.cacheDir)
@@ -111,7 +112,8 @@ class MediaCodecMp3Decoder(private val context: Context) : Mp3Decoder {
                 System.arraycopy(chunk, 0, finalPcmData, currentPosition, chunk.size)
                 currentPosition += chunk.size
             }
-            AppLogger.i(TAG, "解码成功完成。总PCM采样点数: $totalDecodedSize")
+            val endTime = System.currentTimeMillis()
+            AppLogger.i(TAG, "解码完成，耗时 ${endTime - startTime} ms, 总PCM采样点数: $totalDecodedSize，采样率: $actualSampleRate Hz")
 
             if (actualSampleRate == -1) throw IOException("无法确定解码后的音频采样率。")
 

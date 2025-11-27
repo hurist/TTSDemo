@@ -963,7 +963,11 @@ class TtsSynthesizer(
                             }
                             if (sessionStrategy == TtsStrategy.ONLINE_PREFERRED) {
                                 AppLogger.w(TAG, "在线路径失败(缓存未命中/无PCM或API错误)，回退至[离线模式]。原因: ${(onlineResult as? SynthesisResult.Failure)?.reason ?: "unknown"}")
-                                val reason = (onlineResult as? SynthesisResult.Failure)?.reason
+                                val reason = when (onlineResult) {
+                                    is SynthesisResult.Failure -> onlineResult.reason
+                                    is SynthesisResult.Skip -> "在线合成跳过"
+                                    else -> "未知原因"
+                                }
                                 performOfflineSynthesis(index, bag, callReason = reason)
                             } else {
                                 AppLogger.e(TAG, "纯在线模式合成失败，无可用回退。原因: ${(onlineResult as? SynthesisResult.Failure)?.reason ?: "unknown"}")
@@ -1102,7 +1106,11 @@ class TtsSynthesizer(
                     onlineAudioProcessor?.setSpeed(currentSpeed)
                 }
 
-                val speedAdjustedPcm = onlineAudioProcessor?.process(pcmData) ?: pcmData
+                val speedAdjustedPcm = if (currentSpeed != 1.0f) {
+                    onlineAudioProcessor?.process(pcmData) ?: pcmData
+                } else {
+                    pcmData
+                }
                 if (speedAdjustedPcm.isNotEmpty()) {
                     actualSamplesPerSentence[index] = (actualSamplesPerSentence[index] ?: 0L) + speedAdjustedPcm.size
                     enqueuePcmGuarded(
