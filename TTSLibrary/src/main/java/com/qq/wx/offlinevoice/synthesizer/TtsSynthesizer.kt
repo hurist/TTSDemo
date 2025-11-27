@@ -3,7 +3,6 @@ package com.qq.wx.offlinevoice.synthesizer
 import android.content.Context
 import android.content.SharedPreferences
 import android.widget.Toast
-import com.qq.wx.offlinevoice.synthesizer.cache.TtsCacheImpl
 import com.qq.wx.offlinevoice.synthesizer.online.MediaCodecMp3Decoder
 import com.qq.wx.offlinevoice.synthesizer.online.WxApiException
 import com.qq.wx.offlinevoice.synthesizer.online.WxReaderApi
@@ -82,7 +81,14 @@ class TtsSynthesizer(
         object Stop : Command()
         object Release : Command()
         data class SetStrategy(val strategy: TtsStrategy) : Command()
-        data class InternalSentenceStart(val index: Int, val sentence: String, val mode: SynthesisMode, val startPos: Int, val endPos: Int) : Command()
+        data class InternalSentenceStart(
+            val index: Int,
+            val sentence: String,
+            val mode: SynthesisMode,
+            val startPos: Int,
+            val endPos: Int,
+            val triggerReason: String? = null
+        ) : Command()
         data class InternalSentenceEnd(val index: Int, val sentence: String) : Command()
         object InternalSynthesisFinished : Command()
         data class InternalError(val message: String) : Command()
@@ -956,14 +962,15 @@ class TtsSynthesizer(
                             }
                             if (sessionStrategy == TtsStrategy.ONLINE_PREFERRED) {
                                 AppLogger.w(TAG, "在线路径失败(缓存未命中/无PCM或API错误)，回退至[离线模式]。原因: ${(onlineResult as? SynthesisResult.Failure)?.reason ?: "unknown"}")
-                                performOfflineSynthesis(index, bag)
+                                val reason = (onlineResult as? SynthesisResult.Failure)?.reason
+                                performOfflineSynthesis(index, bag, callReason = reason)
                             } else {
                                 AppLogger.e(TAG, "纯在线模式合成失败，无可用回退。原因: ${(onlineResult as? SynthesisResult.Failure)?.reason ?: "unknown"}")
                                 onlineResult
                             }
                         }
                     }
-                    else -> performOfflineSynthesis(index, bag)
+                    else -> performOfflineSynthesis(index, bag, "离线模式")
                 }
 
                 when (finalResult) {
@@ -1132,7 +1139,12 @@ class TtsSynthesizer(
         }
     }
 
-    private suspend fun performOfflineSynthesis(index: Int, bag: TtsBag): SynthesisResult {
+    /**
+     * @param index 句子索引
+     * @param bag 句子包
+     * @param callReason 使用離線的原因描述（僅用於日誌）
+     */
+    private suspend fun performOfflineSynthesis(index: Int, bag: TtsBag, callReason: String? = null): SynthesisResult {
         if (!coroutineContext.isActive || !isSessionActive()) return SynthesisResult.Deferred
         if (audioPlayer.isInProtection() && index != audioPlayer.getProtectedSentenceIndex()) {
             AppLogger.i(TAG, "离线合成请求被延后：当前处于保护期，受保护句=${audioPlayer.getProtectedSentenceIndex()}，请求句=$index, groupIndex:${bag.partInGroup}")
@@ -1174,7 +1186,20 @@ class TtsSynthesizer(
                     return@withLock SynthesisResult.Success
                 }
 
-                val startCb = { if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, trimmed, SynthesisMode.OFFLINE, bag.start, bag.end)) }
+                val startCb = {
+                    if (isSessionActive()) {
+                        sendCommand(
+                            Command.InternalSentenceStart(
+                                index,
+                                trimmed,
+                                SynthesisMode.OFFLINE,
+                                bag.start,
+                                bag.end,
+                                triggerReason = callReason
+                            )
+                        )
+                    }
+                }
                 val endCb = { if (isSessionActive()) sendCommand(Command.InternalSentenceEnd(index, trimmed)) }
 
                 val synthResult = IntArray(1)
