@@ -1,6 +1,7 @@
 package com.qq.wx.offlinevoice.synthesizer
 
 import android.util.Log
+import androidx.collection.LruCache
 import com.qq.wx.offlinevoice.synthesizer.cache.TtsCache
 import com.qq.wx.offlinevoice.synthesizer.online.Mp3Decoder
 import com.qq.wx.offlinevoice.synthesizer.online.OnlineTtsApi
@@ -40,6 +41,14 @@ class TtsRepository(
             // 将字节数组转换为十六进制字符串
             return result.joinToString("") { "%02x".format(it) }
         }
+
+        private val pcmMemoryCache = object : LruCache<String, DecodedPcm>(10 * 1024 * 1024) {
+            override fun sizeOf(key: String, value: DecodedPcm): Int {
+                // 假设 DecodedPcm 有一个 pcmData 属性，存储 PCM 字节数组
+                // LruCache 的 size 参数单位是 bytes，因此这里返回字节数
+                return value.pcmData.size
+            }
+        }
     }
 
     /**
@@ -60,10 +69,19 @@ class TtsRepository(
         val text = text.trim()
         val cacheKey = createCacheKey(text, speaker)
 
+        pcmMemoryCache[cacheKey]?.let { decodedPcm ->
+            AppLogger.d("TtsRepository", "L1 PCM 内存缓存命中: $cacheKey")
+            return@withContext decodedPcm
+        }
+
         // 1) 无锁快速路径：先查 MP3 缓存
         cache.get(cacheKey)?.let { mp3Bytes ->
             val decoded = runCatching {
-                mp3Decoder.decode(mp3Bytes)
+                // L2 命中，进行解码
+                val decodedPcm = mp3Decoder.decode(mp3Bytes)
+                // 存入 L1 内存缓存，供下次快速访问
+                pcmMemoryCache.put(cacheKey, decodedPcm)
+                decodedPcm
             }.onFailure {
                 AppLogger.e("TtsRepository", "MP3缓存 解码失败，尝试重新请求网络: $cacheKey, text: $text", it)
             }.getOrNull()
@@ -99,6 +117,7 @@ class TtsRepository(
 
                 // 2) 将成功获取并解码的结果存入缓存
                 cache.put(cacheKey, mp3Data)
+                pcmMemoryCache.put(cacheKey, decodedPcm)
 
                 return@withContext decodedPcm
             } catch (e: Exception) {
@@ -119,6 +138,7 @@ class TtsRepository(
     fun clearCache() {
         scope.launch {
             cache.clear()
+            pcmMemoryCache.evictAll()
         }
     }
 }
