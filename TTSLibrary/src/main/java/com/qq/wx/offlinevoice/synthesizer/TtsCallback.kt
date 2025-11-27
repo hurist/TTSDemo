@@ -24,7 +24,7 @@ interface TtsCallback {
      * @param startPos 句子在整体文本中的起始位置
      * @param endPos 句子在整体文本中的结束位置
      */
-    fun onSentenceStart(sentenceIndex: Int, sentence: String, totalSentences: Int, mode: SynthesisMode, startPos: Int, endPos: Int)
+    fun onSentenceStart(sentenceIndex: Int, sentence: String, totalSentences: Int, mode: SynthesisMode, startPos: Int, endPos: Int, triggerReason: String? = null)
 
 
     /**

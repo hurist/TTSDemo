@@ -377,6 +377,7 @@ class TtsSynthesizer(
                             mode = command.mode,
                             startPos = lineStartPos.getOrNull(lineId) ?: command.startPos,
                             endPos = lineEndPos.getOrNull(lineId) ?: command.endPos,
+                            triggerReason = command.triggerReason
                         )
                         AppLogger.d(TAG, "修改句子索引为 ${lineId}: ${lineTexts.getOrNull(lineId) ?: command.sentence}")
                         currentCallback?.onSentenceProgressChanged(
