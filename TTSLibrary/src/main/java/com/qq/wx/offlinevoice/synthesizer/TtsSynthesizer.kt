@@ -312,20 +312,22 @@ class TtsSynthesizer(
                 nativeEngine?.init(voiceDataPath.toByteArray())
             }.onFailure {
                 AppLogger.e(TAG, "TtsSynthesizer 初始化本地引擎失败: ${it.message}", it, important = true)
+                // 初始化失败时释放本地引擎，策略强制回 ONLINE_ONLY
+                strategyManager.setStrategy(TtsStrategy.ONLINE_ONLY)
+                instanceCount.decrementAndGet()
+                nativeEngine = null
                 if (linkedLibError != null) {
                     AppLogger.e(TAG, "关联库加载失败，原始错误： ${linkedLibError?.message}", linkedLibError!!, important = true)
                     currentCallback?.onInitialized(linkedLibError!!)
                 } else {
                     currentCallback?.onInitialized(it)
                 }
-                // 初始化失败时释放本地引擎，策略强制回 ONLINE_ONLY
-                strategyManager.setStrategy(TtsStrategy.ONLINE_ONLY)
-                instanceCount.decrementAndGet()
-                nativeEngine = null
             }.onSuccess {
                 AppLogger.i(TAG, "TtsSynthesizer 本地引擎初始化成功。", important = true)
                 currentCallback?.onInitialized(null)
             }
+        } else {
+            AppLogger.i(TAG, "已有 TtsSynthesizer 实例存在，跳过本地引擎初始化。$nativeEngine, instanceCount=${instanceCount.get()}")
         }
         //sendCommand(Command.SetCallback(null))
     }
@@ -758,7 +760,8 @@ class TtsSynthesizer(
         strategyManager.release()
         networkMonitor.release()
         nativeEngineLock.withLock {
-            if (instanceCount.decrementAndGet() == 0) {
+            if (instanceCount.get() >= 1) {
+                instanceCount.decrementAndGet()
                 nativeEngine?.destroy()
                 nativeEngine = null
                 currentVoiceCode = null
@@ -984,7 +987,6 @@ class TtsSynthesizer(
                                 }
                             }
                             if (sessionStrategy == TtsStrategy.ONLINE_PREFERRED) {
-                                // TODO: fix. 设置成仅在线模式不知道为啥有时候也会执行到这里
                                 AppLogger.w(TAG, "在线路径失败(缓存未命中/无PCM或API错误)，回退至[离线模式]。原因: ${(onlineResult as? SynthesisResult.Failure)?.reason ?: "unknown"}")
                                 val reason = when (onlineResult) {
                                     is SynthesisResult.Failure -> onlineResult.reason
