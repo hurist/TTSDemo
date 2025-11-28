@@ -6,9 +6,9 @@ package com.qq.wx.offlinevoice.synthesizer
 interface TtsCallback {
     /**
      * TTS引擎初始化完成时调用
-     * @param success 如果初始化成功则为true
+     * @param error 如果初始化失败，则包含异常信息；如果成功，则为null
      */
-    fun onInitialized(success: Boolean)
+    fun onInitialized(error: Throwable?)
     
     /**
      * 整体TTS合成开始时调用（针对所有句子）

@@ -29,6 +29,7 @@ import kotlin.math.min
 import kotlin.math.pow
 import androidx.core.content.edit
 import com.qq.wx.offlinevoice.synthesizer.cache.TtsCache
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.util.concurrent.CopyOnWriteArrayList
 
@@ -215,6 +216,7 @@ class TtsSynthesizer(
 
     companion object {
         private const val TAG = "TtsSynthesizer"
+        private var linkedLibError: Throwable? = null
         private val instanceCount = AtomicInteger(0)
         private val nativeEngineLock = Mutex()
         @Volatile private var nativeEngine: SynthesizerNative? = null
@@ -283,7 +285,10 @@ class TtsSynthesizer(
             try {
                 System.loadLibrary("hwTTS")
                 System.loadLibrary("weread-tts")
-            } catch (_: UnsatisfiedLinkError) { }
+            } catch (e: UnsatisfiedLinkError) {
+                linkedLibError = e
+                e.printStackTrace()
+            }
         }
 
         fun initLogger(context: Context, config: AppLoggerConfig = AppLoggerConfig()) {
@@ -307,10 +312,19 @@ class TtsSynthesizer(
                 nativeEngine?.init(voiceDataPath.toByteArray())
             }.onFailure {
                 AppLogger.e(TAG, "TtsSynthesizer 初始化本地引擎失败: ${it.message}", it, important = true)
-                currentCallback?.onInitialized(false)
+                if (linkedLibError != null) {
+                    AppLogger.e(TAG, "关联库加载失败，原始错误： ${linkedLibError?.message}", linkedLibError!!, important = true)
+                    currentCallback?.onInitialized(linkedLibError!!)
+                } else {
+                    currentCallback?.onInitialized(it)
+                }
+                // 初始化失败时释放本地引擎，策略强制回 ONLINE_ONLY
+                strategyManager.setStrategy(TtsStrategy.ONLINE_ONLY)
+                instanceCount.decrementAndGet()
+                nativeEngine = null
             }.onSuccess {
                 AppLogger.i(TAG, "TtsSynthesizer 本地引擎初始化成功。", important = true)
-                currentCallback?.onInitialized(true)
+                currentCallback?.onInitialized(null)
             }
         }
         //sendCommand(Command.SetCallback(null))
@@ -361,7 +375,7 @@ class TtsSynthesizer(
                 is Command.SetStrategy -> strategyManager.setStrategy(command.strategy)
                 is Command.SetCallback -> {
                     currentCallback = command.callback;
-                    currentCallback?.onInitialized(true)
+                    //currentCallback?.onInitialized(true)
                 }
                 is Command.InternalSentenceStart -> {
                     // 映射到逻辑行
@@ -970,6 +984,7 @@ class TtsSynthesizer(
                                 }
                             }
                             if (sessionStrategy == TtsStrategy.ONLINE_PREFERRED) {
+                                // TODO: fix. 设置成仅在线模式不知道为啥有时候也会执行到这里
                                 AppLogger.w(TAG, "在线路径失败(缓存未命中/无PCM或API错误)，回退至[离线模式]。原因: ${(onlineResult as? SynthesisResult.Failure)?.reason ?: "unknown"}")
                                 val reason = when (onlineResult) {
                                     is SynthesisResult.Failure -> onlineResult.reason
@@ -979,6 +994,19 @@ class TtsSynthesizer(
                                 performOfflineSynthesis(index, bag, callReason = reason)
                             } else {
                                 AppLogger.e(TAG, "纯在线模式合成失败，无可用回退。原因: ${(onlineResult as? SynthesisResult.Failure)?.reason ?: "unknown"}")
+                                // 如果是不是跳过类型的失败，则在当前句报错提示
+                                if (onlineResult !is SynthesisResult.Skip) {
+                                    // 如果是当前句子，则报错
+                                    if (synthesisSentenceIndex == index) {
+                                        withContext(Dispatchers.Main) {
+                                            Toast.makeText(
+                                                context,
+                                                "Network error, please check your network.",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                    }
+                                }
                                 onlineResult
                             }
                         }
@@ -987,7 +1015,8 @@ class TtsSynthesizer(
                 }
 
                 when (finalResult) {
-                    is SynthesisResult.Success -> {
+                    is SynthesisResult.Success,
+                    is SynthesisResult.Skip -> {
                         AppLogger.d(TAG, "处理合成位置：synthesisSentenceIndex:$synthesisSentenceIndex, index:$index")
                         if (synthesisSentenceIndex == index) synthesisSentenceIndex++
                     }
