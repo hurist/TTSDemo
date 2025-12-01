@@ -486,9 +486,10 @@ class TtsSynthesizer(
         mapSmoothLastSentence = -1
         mapSmoothFrac = 0f
 
+        val replacedText = text.replaceSpecialChar()
         val result = when (splitterStrategy) {
-            SentenceSplitterStrategy.NEWLINE -> SentenceSplitter.sentenceSplitListByLine(text, beginPos)
-            SentenceSplitterStrategy.PUNCTUATION -> SentenceSplitter.sentenceSplitList(text)
+            SentenceSplitterStrategy.NEWLINE -> SentenceSplitter.sentenceSplitListByLine(replacedText, beginPos)
+            SentenceSplitterStrategy.PUNCTUATION -> SentenceSplitter.sentenceSplitList(replacedText)
         }
         if (result.isEmpty()) {
             AppLogger.w(TAG, "提供的文本中未找到有效句子。", important = true)
@@ -498,7 +499,7 @@ class TtsSynthesizer(
         sentences.addAll(result)
 
         // 构建逻辑行映射
-        buildLogicalLineMapping(text)
+        buildLogicalLineMapping(replacedText)
 
         // 清理句级观测缓存（EWMA 的比例字典保留，用于跨会话自适应）
         predictedSamplesPerSentence.clear()
