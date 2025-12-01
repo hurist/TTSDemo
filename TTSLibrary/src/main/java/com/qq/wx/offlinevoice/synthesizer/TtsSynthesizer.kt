@@ -1240,7 +1240,7 @@ class TtsSynthesizer(
                     val reason = "合成[离线]句子准备失败 (code=$prepare) 句子: $bag"
                     AppLogger.e(TAG, "prepare 失败：$reason（按成功跳过处理，避免打断整体流程）")
                     currentCallback?.onSynthesisError(
-                        SynthesisMode.OFFLINE,
+                        mode = SynthesisMode.OFFLINE,
                         errorCode = prepare,
                         errorMessage = "离线prepare失败",
                         sentence = trimmed
