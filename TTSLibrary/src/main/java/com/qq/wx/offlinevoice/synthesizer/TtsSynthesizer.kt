@@ -1080,11 +1080,10 @@ class TtsSynthesizer(
     }
 
     private suspend fun performOnlineSynthesis(index: Int, bag: TtsBag): SynthesisResult {
+        val sentence = bag.text
+        val trimmed = sentence.trim()
         try {
             if (!coroutineContext.isActive || !isSessionActive()) return SynthesisResult.Deferred
-
-            val sentence = bag.text
-            val trimmed = sentence.trim()
             if (trimmed.isOnlyPunctuationAndWhitespace()) {
                 AppLogger.w(TAG, "句子 $bag, 无有效内容，跳过在线合成。", important = true)
                 enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.ONLINE) {
@@ -1170,7 +1169,12 @@ class TtsSynthesizer(
             val code = e.errorCode
             val reason = "合成[在线] (句子 $bag)失败: ${e.message}, code=$code"
             AppLogger.e(TAG, reason, important = true)
-            currentCallback?.onSynthesisError(SynthesisMode.ONLINE, errorCode = code, errorMessage = "${e.message}_${bag.text.take(10)}")
+            currentCallback?.onSynthesisError(
+                mode = SynthesisMode.ONLINE,
+                errorCode = code,
+                sentence = trimmed,
+                errorMessage = e.message
+            )
             clearBufferingOnProgress(index)
             if (code == 1111 || code == 1110) {
                 return SynthesisResult.Skip("在线合成请求被拒绝（跳过）: $reason")
@@ -1179,7 +1183,12 @@ class TtsSynthesizer(
         } catch (e: Exception) {
             val reason = "合成[在线] (句子 $bag)失败: ${e.message}"
             if (e !is ForbiddenNetworkException && e !is CancellationException) {
-                currentCallback?.onSynthesisError(SynthesisMode.ONLINE, errorCode = -1, errorMessage = "${e.message}_${bag.text.take(10)}")
+                currentCallback?.onSynthesisError(
+                    mode = SynthesisMode.ONLINE,
+                    errorCode = -1,
+                    errorMessage = e.message,
+                    sentence = trimmed
+                )
             }
             clearBufferingOnProgress(index)
             AppLogger.e(TAG, reason, important = true)
@@ -1200,9 +1209,9 @@ class TtsSynthesizer(
         }
 
         val sentence = bag.text
+        val trimmed = sentence.trim()
         return nativeEngineLock.withLock {
             try {
-                val trimmed = sentence.trim()
                 if (trimmed.isOnlyPunctuationAndWhitespace()) {
                     AppLogger.w(TAG, "句子 $bag 无有效内容，跳过离线合成。", important = true)
                     return@withLock SynthesisResult.Success
@@ -1230,7 +1239,12 @@ class TtsSynthesizer(
                 if (prepare != 0) {
                     val reason = "合成[离线]句子准备失败 (code=$prepare) 句子: $bag"
                     AppLogger.e(TAG, "prepare 失败：$reason（按成功跳过处理，避免打断整体流程）")
-                    currentCallback?.onSynthesisError(SynthesisMode.OFFLINE,"code=${prepare}_${bag.text.take(10)}")
+                    currentCallback?.onSynthesisError(
+                        SynthesisMode.OFFLINE,
+                        errorCode = prepare,
+                        errorMessage = "离线prepare失败",
+                        sentence = trimmed
+                    )
                     return@withLock SynthesisResult.Success
                 }
 
@@ -1262,7 +1276,12 @@ class TtsSynthesizer(
                     val status = nativeEngine?.synthesize(pcmArray, TtsConstants.PCM_BUFFER_SIZE, synthResult, 1) ?: -1
                     if (status == -1) {
                         val reason = "合成[离线]句子合成失败，状态码: -1"
-                        currentCallback?.onSynthesisError(SynthesisMode.OFFLINE,"${reason}_${bag.text.take(10)}")
+                        currentCallback?.onSynthesisError(
+                            mode = SynthesisMode.OFFLINE,
+                            errorMessage = "离线synthesize失败",
+                            errorCode = status,
+                            sentence = trimmed
+                        )
                         AppLogger.e(TAG, reason, important = true)
                         return@withLock SynthesisResult.Success
                     }
@@ -1302,7 +1321,12 @@ class TtsSynthesizer(
             } catch (e: Exception) {
                 val reason = "合成[离线](句子 $bag)异常: ${e.message}"
                 AppLogger.e(TAG, reason, e, important = true)
-                currentCallback?.onSynthesisError(SynthesisMode.OFFLINE,"${e.message}_${bag.text.take(10)}")
+                currentCallback?.onSynthesisError(
+                    mode = SynthesisMode.OFFLINE,
+                    errorMessage = e.message,
+                    errorCode = -1,
+                    sentence = trimmed
+                )
                 SynthesisResult.Failure(reason)
             } finally {
                 nativeEngine?.reset()
