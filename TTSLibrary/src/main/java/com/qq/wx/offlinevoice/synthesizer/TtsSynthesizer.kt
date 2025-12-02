@@ -486,7 +486,7 @@ class TtsSynthesizer(
         mapSmoothLastSentence = -1
         mapSmoothFrac = 0f
 
-        val replacedText = text.replaceSpecialChar()
+        val replacedText = text//.replaceSpecialChar()
         val result = when (splitterStrategy) {
             SentenceSplitterStrategy.NEWLINE -> SentenceSplitter.sentenceSplitListByLine(replacedText, beginPos)
             SentenceSplitterStrategy.PUNCTUATION -> SentenceSplitter.sentenceSplitList(replacedText)
@@ -1082,7 +1082,7 @@ class TtsSynthesizer(
 
     private suspend fun performOnlineSynthesis(index: Int, bag: TtsBag): SynthesisResult {
         val sentence = bag.text
-        val trimmed = sentence.trim()
+        val trimmed = sentence.trim().processForTts()
         try {
             if (!coroutineContext.isActive || !isSessionActive()) return SynthesisResult.Deferred
             if (trimmed.isOnlyPunctuationAndWhitespace()) {
@@ -1210,7 +1210,7 @@ class TtsSynthesizer(
         }
 
         val sentence = bag.text
-        val trimmed = sentence.trim()
+        val trimmed = sentence.trim().processForTts()
         return nativeEngineLock.withLock {
             try {
                 if (trimmed.isOnlyPunctuationAndWhitespace()) {
