@@ -389,7 +389,7 @@ class TtsSynthesizer(
                     // 判断是否为“仅由标点和空白组成的句子”（如 "…", "!!!", "。。   " ）。
                     // 这种句子在 TTS 中一般不会真正朗读，因此需要特殊处理。
                     val isUnderlyingPunctuationOnly =
-                        command.sentence.trim().processForTts().isOnlyPunctuationAndWhitespace()
+                        command.sentence.trim().processForTts().isOnlyPunctuationOrEmpty()
 
                     // 若该句子是纯标点，则不触发 onSentenceStart 回调。
                     // -------------------------------------------------------------
@@ -1107,7 +1107,7 @@ class TtsSynthesizer(
         val trimmed = sentence.trim().processForTts()
         try {
             if (!coroutineContext.isActive || !isSessionActive()) return SynthesisResult.Deferred
-            if (trimmed.isOnlyPunctuationAndWhitespace()) {
+            if (trimmed.isOnlyPunctuationOrEmpty()) {
                 AppLogger.w(TAG, "句子 $bag, 无有效内容，跳过在线合成。", important = true)
                 enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.ONLINE) {
                     if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, sentence, SynthesisMode.ONLINE, bag.start, bag.end))
@@ -1239,7 +1239,7 @@ class TtsSynthesizer(
                     AppLogger.i(TAG, "离线合成开始前会话不活跃/已取消，$bag -> Deferred")
                     return@withLock SynthesisResult.Deferred
                 }
-                if (trimmed.isOnlyPunctuationAndWhitespace()) {
+                if (trimmed.isOnlyPunctuationOrEmpty()) {
                     AppLogger.w(TAG, "句子 $bag 无有效内容，跳过离线合成。", important = true)
                     enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.OFFLINE) {
                         if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, sentence, SynthesisMode.OFFLINE, bag.start, bag.end))

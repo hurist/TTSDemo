@@ -7,7 +7,7 @@ import com.qq.wx.offlinevoice.synthesizer.SentenceSplitterStrategy
 import com.qq.wx.offlinevoice.synthesizer.Speaker
 import com.qq.wx.offlinevoice.synthesizer.TtsRepository
 import com.qq.wx.offlinevoice.synthesizer.TtsSynthesizer
-import com.qq.wx.offlinevoice.synthesizer.isOnlyPunctuationAndWhitespace
+import com.qq.wx.offlinevoice.synthesizer.isOnlyPunctuationOrEmpty
 import com.qq.wx.offlinevoice.synthesizer.online.WxApiException
 import com.qq.wx.offlinevoice.synthesizer.processForTts
 import kotlinx.coroutines.CancellationException
@@ -21,7 +21,9 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flatMapMerge
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onCompletion
+import kotlinx.coroutines.flow.transform
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -49,10 +51,7 @@ internal class PreloadJob(
             SentenceSplitterStrategy.NEWLINE -> SentenceSplitter.sentenceSplitListByLine(content)
             SentenceSplitterStrategy.PUNCTUATION -> SentenceSplitter.sentenceSplitList(content)
         }
-        val processedData = bags
-            .filter { it.text.isOnlyPunctuationAndWhitespace().not() }
-            .map { bag -> bag.copy(text = bag.text.trim().processForTts()) }
-        pendingBags.addAll(processedData)
+        pendingBags.addAll(bags)
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
@@ -74,13 +73,25 @@ internal class PreloadJob(
 
         AppLogger.d(TAG, "启动一轮预加载，待处理句子数: ${pendingBags.size}")
 
-        // 注意：asFlow() 会创建当前队列内容的快照流
         pendingBags.asFlow()
-            .flatMapMerge(concurrency = concurrencyLimit) { bag ->
+            .map { bag ->
+                val processedText = bag.text.trim().processForTts()
+                Triple(bag, processedText, processedText.isOnlyPunctuationOrEmpty())
+            }
+            .transform { (bag, text, isInvalid) ->
+                if (isInvalid) {
+                    AppLogger.d(TAG, "跳过无效/纯符号文本，并移除: ${bag.text}")
+                    pendingBags.remove(bag) // <--- 关键：无效的要移除！
+                    // 不发射数据，下游就不会处理它
+                } else {
+                    emit(bag to text) // 有效的数据才发射给 flatMapMerge
+                }
+            }
+            .flatMapMerge(concurrency = concurrencyLimit) { (bag, text) ->
                 flow {
                     try {
-                        ttsRepository.getDecodedPcm(bag.text.trim(), speaker, allowNetwork = true)
-                        AppLogger.d(TAG, "预加载成功: text=${bag.text.take(20)}")
+                        ttsRepository.getDecodedPcm(text, speaker, allowNetwork = true)
+                        AppLogger.d(TAG, "预加载成功: text=${text.take(20)}")
                         // 成功后从队列中移除
                         pendingBags.remove(bag)
                         emit(Unit)
@@ -91,10 +102,10 @@ internal class PreloadJob(
                             pendingBags.remove(bag) // 非Token无效的API错误，移除任务
                         }
                         // 网络或API错误，保留在队列中等待重试
-                        AppLogger.e(TAG, "网络/API错误: text=${bag.text.take(20)}, error=${e.message}")
+                        AppLogger.e(TAG, "网络/API错误: text=${text.take(20)}, error=${e.message}")
                     } catch (e: Exception) {
                         // 其他未知异常，也暂时保留，可根据业务调整
-                        AppLogger.e(TAG, "未知错误，将保留任务待重试: text=${bag.text.take(20)}, error=${e.message}")
+                        AppLogger.e(TAG, "未知错误，将保留任务待重试: text=${text.take(20)}, error=${e.message}")
                     }
                 }
             }
