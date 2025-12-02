@@ -9,6 +9,7 @@ import com.qq.wx.offlinevoice.synthesizer.TtsRepository
 import com.qq.wx.offlinevoice.synthesizer.TtsSynthesizer
 import com.qq.wx.offlinevoice.synthesizer.isOnlyPunctuationAndWhitespace
 import com.qq.wx.offlinevoice.synthesizer.online.WxApiException
+import com.qq.wx.offlinevoice.synthesizer.processForTts
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -48,7 +49,10 @@ internal class PreloadJob(
             SentenceSplitterStrategy.NEWLINE -> SentenceSplitter.sentenceSplitListByLine(content)
             SentenceSplitterStrategy.PUNCTUATION -> SentenceSplitter.sentenceSplitList(content)
         }
-        pendingBags.addAll(bags.filter { it.text.isOnlyPunctuationAndWhitespace().not() })
+        val processedData = bags
+            .filter { it.text.isOnlyPunctuationAndWhitespace().not() }
+            .map { bag -> bag.copy(text = bag.text.trim().processForTts()) }
+        pendingBags.addAll(processedData)
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
