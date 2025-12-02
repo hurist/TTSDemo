@@ -1087,12 +1087,14 @@ class TtsSynthesizer(
             if (!coroutineContext.isActive || !isSessionActive()) return SynthesisResult.Deferred
             if (trimmed.isOnlyPunctuationAndWhitespace()) {
                 AppLogger.w(TAG, "句子 $bag, 无有效内容，跳过在线合成。", important = true)
+                /* 先暂时不发送标记了，感觉没啥意义
                 enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.ONLINE) {
                     if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, sentence, SynthesisMode.ONLINE, bag.start, bag.end))
                 }
                 enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_END, SynthesisMode.ONLINE) {
                     if (isSessionActive()) sendCommand(Command.InternalSentenceEnd(index, sentence))
                 }
+                */
                 return SynthesisResult.Success
             }
             AppLogger.d(TAG, "合成[在线]句子 $bag", important = true)
@@ -1213,13 +1215,13 @@ class TtsSynthesizer(
         val trimmed = sentence.trim().processForTts()
         return nativeEngineLock.withLock {
             try {
-                if (trimmed.isOnlyPunctuationAndWhitespace()) {
-                    AppLogger.w(TAG, "句子 $bag 无有效内容，跳过离线合成。", important = true)
-                    return@withLock SynthesisResult.Success
-                }
                 if (!coroutineContext.isActive || !isSessionActive()) {
                     AppLogger.i(TAG, "离线合成开始前会话不活跃/已取消，$bag -> Deferred")
                     return@withLock SynthesisResult.Deferred
+                }
+                if (trimmed.isOnlyPunctuationAndWhitespace()) {
+                    AppLogger.w(TAG, "句子 $bag 无有效内容，跳过离线合成。", important = true)
+                    return@withLock SynthesisResult.Success
                 }
 
                 AppLogger.d(TAG, "合成[离线]句子 $bag", important = true)
