@@ -385,7 +385,28 @@ class TtsSynthesizer(
                     val lineId = segmentToLine.getOrNull(command.index) ?: command.index
                     playingSentenceIndex = command.index // 内部仍记录物理段
                     //if (!lineStarted.contains(lineId)) {
-                        lineStarted.add(lineId)
+                    lineStarted.add(lineId)
+                    // 判断是否为“仅由标点和空白组成的句子”（如 "…", "!!!", "。。   " ）。
+                    // 这种句子在 TTS 中一般不会真正朗读，因此需要特殊处理。
+                    val isUnderlyingPunctuationOnly =
+                        command.sentence.trim().processForTts().isOnlyPunctuationAndWhitespace()
+
+                    // 若该句子是纯标点，则不触发 onSentenceStart 回调。
+                    // -------------------------------------------------------------
+                    // 为什么不能直接不发送 InternalSentenceStart？
+                    // 因为底层 TTS 引擎的内部流程仍然依赖这个事件，因此必须发送。
+                    // 但我们不能把此事件回调给上层，否则会造成业务问题。
+                    //
+                    // 背景说明：
+                    // 在“在线优先”策略下，如果设备实际处于无网状态，前面句子一直用离线 TTS 播放，
+                    // 日志统计的模式也是离线。但当遇到这种“纯标点句子”时：
+                    //   - 在线合成会直接返回成功（因为只含标点）
+                    //   - 系统会认为发生了“离线 → 在线”或“在线 → 离线”的模式切换
+                    //   - 进而多触发一次模式切换打点，导致统计数据不准确
+                    //
+                    // 因此：
+                    // 内部事件仍保留，但对业务层不回调 onSentenceStart。
+                    if (!isUnderlyingPunctuationOnly) {
                         currentCallback?.onSentenceStart(
                             sentenceIndex = lineId,
                             sentence = lineTexts.getOrNull(lineId) ?: command.sentence,
@@ -395,15 +416,16 @@ class TtsSynthesizer(
                             endPos = lineEndPos.getOrNull(lineId) ?: command.endPos,
                             triggerReason = command.triggerReason
                         )
-                        AppLogger.d(TAG, "修改句子索引为 ${lineId}: ${lineTexts.getOrNull(lineId) ?: command.sentence}")
-                        currentCallback?.onSentenceProgressChanged(
-                            sentenceIndex = lineId,
-                            sentence = lineTexts.getOrNull(lineId) ?: command.sentence,
-                            progress = 0,
-                            char = "",
-                            startPos = lineStartPos.getOrNull(lineId) ?: command.startPos,
-                            endPos = lineEndPos.getOrNull(lineId) ?: command.endPos,
-                        )
+                    }
+                    AppLogger.d(TAG, "修改句子索引为 ${lineId}: ${lineTexts.getOrNull(lineId) ?: command.sentence}")
+                    currentCallback?.onSentenceProgressChanged(
+                        sentenceIndex = lineId,
+                        sentence = lineTexts.getOrNull(lineId) ?: command.sentence,
+                        progress = 0,
+                        char = "",
+                        startPos = lineStartPos.getOrNull(lineId) ?: command.startPos,
+                        endPos = lineEndPos.getOrNull(lineId) ?: command.endPos,
+                    )
                     //}
                 }
                 is Command.InternalSentenceEnd -> {
@@ -1087,14 +1109,12 @@ class TtsSynthesizer(
             if (!coroutineContext.isActive || !isSessionActive()) return SynthesisResult.Deferred
             if (trimmed.isOnlyPunctuationAndWhitespace()) {
                 AppLogger.w(TAG, "句子 $bag, 无有效内容，跳过在线合成。", important = true)
-                /* 先暂时不发送标记了，感觉没啥意义
                 enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.ONLINE) {
                     if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, sentence, SynthesisMode.ONLINE, bag.start, bag.end))
                 }
                 enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_END, SynthesisMode.ONLINE) {
                     if (isSessionActive()) sendCommand(Command.InternalSentenceEnd(index, sentence))
                 }
-                */
                 return SynthesisResult.Success
             }
             AppLogger.d(TAG, "合成[在线]句子 $bag", important = true)
@@ -1221,6 +1241,12 @@ class TtsSynthesizer(
                 }
                 if (trimmed.isOnlyPunctuationAndWhitespace()) {
                     AppLogger.w(TAG, "句子 $bag 无有效内容，跳过离线合成。", important = true)
+                    enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.OFFLINE) {
+                        if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, sentence, SynthesisMode.OFFLINE, bag.start, bag.end))
+                    }
+                    enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_END, SynthesisMode.OFFLINE) {
+                        if (isSessionActive()) sendCommand(Command.InternalSentenceEnd(index, sentence))
+                    }
                     return@withLock SynthesisResult.Success
                 }
 
