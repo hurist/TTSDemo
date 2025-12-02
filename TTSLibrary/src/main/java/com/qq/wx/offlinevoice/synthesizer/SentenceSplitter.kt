@@ -191,7 +191,7 @@ object SentenceSplitter {
      * 基于“句末标点”切分，并应用长度约束和 beginPos 切分。
      */
     fun sentenceSplitList(text: String, beginPos: Int? = null): List<TtsSynthesizer.TtsBag> {
-        val maxLength = 150
+        val maxLength = 70
         // 1. 获取初始分组（按句末标点）
         var initialGroups = listOf(GroupRange(0, text.length, 0, false))
         initialGroups = toSplit(initialGroups, text, RegexConfig.LineBreak)
@@ -211,7 +211,7 @@ object SentenceSplitter {
      * 先按换行分割，再对每行应用长度约束和 beginPos 切分。
      */
     fun sentenceSplitListByLine(text: String, beginPos: Int? = null): List<TtsSynthesizer.TtsBag> {
-        val maxLength = 150
+        val maxLength = 70
         // 1. 获取初始分组（按换行）
         val initialGroups = toSplit(listOf(GroupRange(0, text.length, 0, false)), text, RegexConfig.LineBreak)
 
