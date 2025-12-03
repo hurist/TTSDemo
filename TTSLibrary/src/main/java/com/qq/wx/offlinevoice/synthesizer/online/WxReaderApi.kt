@@ -26,6 +26,7 @@ import com.qq.wx.offlinevoice.synthesizer.online.token.TokenProvider
 import com.qq.wx.offlinevoice.synthesizer.online.token.KEY_UID
 import com.qq.wx.offlinevoice.synthesizer.online.token.WX_SP_NAME
 import com.qq.wx.offlinevoice.synthesizer.online.token.WxTokenManager
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
@@ -177,7 +178,11 @@ class WxReaderApi(private val context: Context) : OnlineTtsApi {
                 // 统一捕获所有异常，简化错误处理
                 AppLogger.e(TAG, "获取 TTS 音频失败: ${e.message}", e)
                 // 将所有异常统一包装或重新抛出为 IOException，方便上层处理
-                throw IOException("获取 TTS 音频失败: ${e.message}", e)
+                if (e !is CancellationException) {
+                    throw IOException("获取 TTS 音频失败: ${e.message}", e)
+                } else {
+                    throw e
+                }
             }
         }
     }
