@@ -29,6 +29,8 @@ import kotlin.math.min
 import kotlin.math.pow
 import androidx.core.content.edit
 import com.qq.wx.offlinevoice.synthesizer.cache.TtsCache
+import com.qq.wx.offlinevoice.synthesizer.normalizer.SimplifiedTtsNormalizer
+import com.qq.wx.offlinevoice.synthesizer.normalizer.TraditionalTtsNormalizer
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import java.util.concurrent.CopyOnWriteArrayList
@@ -72,7 +74,12 @@ class TtsSynthesizer(
     }
 
     private sealed class Command {
-        data class Speak(val text: String, val beginPos: Int = 0) : Command()
+        data class Speak(
+            val text: String,
+            val beginPos: Int = 0,
+            // 是否为繁体
+            val isTraditional: Boolean = false
+        ) : Command()
         data class SetSpeed(val speed: Float) : Command()
         data class SetVolume(val volume: Float) : Command()
         data class SetVoice(val speaker: Speaker) : Command()
@@ -130,6 +137,7 @@ class TtsSynthesizer(
         }
     }
     private val sentences = CopyOnWriteArrayList<TtsBag>()
+    private var isTtsTextTraditional: Boolean = false
 
     @Volatile private var playingSentenceIndex: Int = 0 // 仍指向“物理段”索引
     private var synthesisSentenceIndex by Delegates.observable(0) { _, oldValue, newValue ->
@@ -337,7 +345,7 @@ class TtsSynthesizer(
     fun setSpeed(speed: Float) = sendCommand(Command.SetSpeed(speed))
     fun setVolume(volume: Float) = sendCommand(Command.SetVolume(volume))
     fun setVoice(speaker: Speaker) = sendCommand(Command.SetVoice(speaker))
-    fun speak(text: String, beginPos: Int = 0) = sendCommand(Command.Speak(text, beginPos))
+    fun speak(text: String, beginPos: Int = 0, isTraditional: Boolean = false) = sendCommand(Command.Speak(text, beginPos ,isTraditional))
     fun pause() = sendCommand(Command.Pause)
     fun resume() = sendCommand(Command.Resume)
     fun stop() = sendCommand(Command.Stop)
@@ -366,7 +374,7 @@ class TtsSynthesizer(
     private suspend fun commandProcessor() {
         for (command in commandChannel) {
             when (command) {
-                is Command.Speak -> handleSpeak(command.text, command.beginPos)
+                is Command.Speak -> handleSpeak(command.text, command.beginPos, command.isTraditional)
                 is Command.SetSpeed -> handleSetSpeed(command.speed)
                 is Command.SetVolume -> handleSetVolume(command.volume)
                 is Command.SetVoice -> handleSetSpeaker(command.speaker)
@@ -485,7 +493,7 @@ class TtsSynthesizer(
     private fun isSessionActive(): Boolean = sessionJob?.isActive == true
 
     // ============ 命令实现 ============
-    private suspend fun handleSpeak(text: String, beginPos: Int = 0) {
+    private suspend fun handleSpeak(text: String, beginPos: Int = 0, isTraditional: Boolean = false) {
         if (currentState == TtsPlaybackState.PLAYING || currentState == TtsPlaybackState.PAUSED) {
             AppLogger.d(TAG, "已有语音在播放中，将先停止当前任务再开始新的任务。")
             handleStop()
@@ -519,6 +527,7 @@ class TtsSynthesizer(
             return
         }
         sentences.addAll(result)
+        isTtsTextTraditional = isTraditional
 
         // 构建逻辑行映射
         buildLogicalLineMapping(replacedText)
@@ -1104,7 +1113,7 @@ class TtsSynthesizer(
 
     private suspend fun performOnlineSynthesis(index: Int, bag: TtsBag): SynthesisResult {
         val sentence = bag.text
-        val trimmed = sentence.trim().processForTts()
+        val trimmed = processTextForTts(sentence)
         try {
             if (!coroutineContext.isActive || !isSessionActive()) return SynthesisResult.Deferred
             if (trimmed.isOnlyPunctuationOrEmpty()) {
@@ -1232,7 +1241,7 @@ class TtsSynthesizer(
         }
 
         val sentence = bag.text
-        val trimmed = sentence.trim().processForTts()
+        val trimmed = processTextForTts(sentence)
         return nativeEngineLock.withLock {
             try {
                 if (!coroutineContext.isActive || !isSessionActive()) {
@@ -1361,6 +1370,16 @@ class TtsSynthesizer(
                 nativeEngine?.reset()
             }
         }
+    }
+
+    private fun processTextForTts(input: String): String {
+        var text = input.trim().processForTts()
+        text = if (isTtsTextTraditional) {
+            TraditionalTtsNormalizer.process(text)
+        } else {
+            SimplifiedTtsNormalizer.process(text)
+        }
+        return text
     }
 
     // ============ “Guarded” 边界封装（方案 A：集中会话守卫） ============

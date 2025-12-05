@@ -13,6 +13,21 @@
         android:padding="16dp"
         tools:context=".MainActivity">
 
+        <EditText
+            android:id="@+id/editTextInput"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:gravity="top|start"
+            android:hint="在此输入要播放的文本..."
+            android:inputType="textMultiLine"
+            android:maxLines="5"
+            android:minLines="1"
+            android:scrollbars="vertical"
+            app:layout_constraintEnd_toEndOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintTop_toTopOf="parent" />
+
         <androidx.appcompat.widget.LinearLayoutCompat
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -84,8 +99,8 @@
             android:id="@+id/currentText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:textSize="10sp"
-            android:minHeight="50dp"/>
+            android:minHeight="50dp"
+            android:textSize="10sp" />
 
         <com.hurist.ttsdemo.LogRecyclerView
             android:id="@+id/logRecyclerView"
@@ -159,20 +174,6 @@
             app:layout_constraintStart_toStartOf="parent"
             app:layout_constraintTop_toBottomOf="@id/textViewVoice" />
 
-        <EditText
-            android:id="@+id/editTextInput"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:gravity="top|start"
-            android:hint="在此输入要播放的文本..."
-            android:inputType="textMultiLine"
-            android:maxLines="5"
-            android:minLines="1"
-            android:scrollbars="vertical"
-            app:layout_constraintEnd_toEndOf="parent"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toTopOf="parent" />
 
         <EditText
             android:id="@+id/tokenInput"
@@ -183,11 +184,8 @@
             android:hint="token输入框"
             android:inputType="textMultiLine"
             android:scrollbars="vertical"
-            android:visibility="gone"
             android:text="yOqsngQ5CQ16j091qU8Rgvu/v5VskVLSnkjWORlDIrfQi+7DvEJoeiKv7MdsXY7o"
-            app:layout_constraintEnd_toEndOf="parent"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toBottomOf="@id/editTextInput" />
+            android:visibility="gone" />
 
         <EditText
             android:id="@+id/uidInput"
@@ -198,11 +196,8 @@
             android:hint="uid输入框"
             android:inputType="textMultiLine"
             android:scrollbars="vertical"
-            android:visibility="gone"
             android:text="925813821"
-            app:layout_constraintEnd_toEndOf="parent"
-            app:layout_constraintStart_toStartOf="parent"
-            app:layout_constraintTop_toBottomOf="@id/tokenInput" />
+            android:visibility="gone" />
 
 
     </androidx.appcompat.widget.LinearLayoutCompat>

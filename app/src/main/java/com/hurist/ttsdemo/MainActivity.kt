@@ -139,7 +139,16 @@ class MainActivity : AppCompatActivity() {
         //binding.uidInput.setText(uid.toString())
 
         // 设置默认文本
-        binding.editTextInput.setText(text)
+        binding.editTextInput.setText("""
+            著名作家在著作裡強調：吃著東西別站著講話。顯著成效來自著重實踐，而非著眼理論。
+            他很執著，也常膠著；但西藏之行讓他放下執念。
+            沈默寡言、沈睡不足、陰沈心情，甚至沈著冷靜，醫生都說要多休息。
+            瞭解/明瞭 之後，再行動。行長與銀行業務行為需協調；音樂樂隊正在排曲調。
+            憑藉經驗，慰藉自己；覆蓋範圍均勻分布。參與比賽、參加活動、人參補氣。
+            衝突衝擊衝動衝刺；喫茶喫飯喫藥；夥計與妳託付的占卜故事。
+            祕密/爲什麼/永恆/山峯/馬廄/起牀/線上/慾望/汙水/溼氣/裏面/纔到/麵點/餘款/蹟跡/摺疊/訊息/彙報/牠/鹹魚/鬆樹/傢俱/什麼。
+            特殊符號測試：price=$100; path=C:\temp\著錄.txt
+        """.trimIndent())
 
         // 设置语速滑动条 (0.5x到3.0x，步进0.1，默认1.0x)
         // SeekBar范围: 0-25，映射到0.5-3.0
@@ -201,7 +210,7 @@ class MainActivity : AppCompatActivity() {
 
 
             if (text.isNotEmpty()) {
-                tts?.speak(text, 0)
+                tts?.speak(text, 0, true)
             } else {
                 updateStatus("请输入要播放的文本")
             }
@@ -245,9 +254,9 @@ class MainActivity : AppCompatActivity() {
 
         // 设置回调以监听TTS事件
         val callback = object : TtsCallback {
-            override fun onInitialized(success: Boolean) {
-                Log.d(TAG, "TTS初始化: $success")
-                if (success) {
+            override fun onInitialized(error: Throwable?) {
+                Log.d(TAG, "TTS初始化: $error")
+                if (error != null) {
                     runOnUiThread {
                         updateStatus("TTS引擎已就绪")
                         enableControls(true)
