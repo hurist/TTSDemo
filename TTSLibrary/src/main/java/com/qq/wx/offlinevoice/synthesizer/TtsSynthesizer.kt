@@ -1117,7 +1117,17 @@ class TtsSynthesizer(
         try {
             if (!coroutineContext.isActive || !isSessionActive()) return SynthesisResult.Deferred
             if (trimmed.isOnlyPunctuationOrEmpty()) {
-                AppLogger.w(TAG, "句子 $bag, 无有效内容，跳过在线合成。", important = true)
+                AppLogger.w(
+                    TAG,
+                    msg = """
+                        ┌ ----------------------------
+                        | 合成[在线]句子无效内容，跳过合成
+                        | bag: $bag, 
+                        | 实际文本: "$trimmed"
+                        └ ----------------------------
+                        """.trimIndent(),
+                    important = true
+                )
                 enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.ONLINE) {
                     if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, sentence, SynthesisMode.ONLINE, bag.start, bag.end))
                 }
@@ -1126,7 +1136,17 @@ class TtsSynthesizer(
                 }
                 return SynthesisResult.Success
             }
-            AppLogger.d(TAG, "合成[在线]句子 $bag", important = true)
+            AppLogger.d(
+                TAG,
+                """
+                    ┌ ----------------------------
+                    | 合成[在线]句子开始
+                    | bag: $bag, 
+                    | 实际文本: "$trimmed"
+                    └ ----------------------------
+                """.trimIndent(),
+                important = true
+            )
             val start = System.currentTimeMillis()
 
             val isCoolingDown = System.currentTimeMillis() < onlineCooldownUntilTimestamp
@@ -1154,13 +1174,29 @@ class TtsSynthesizer(
             val pcmData = decoded.pcmData
             val sampleRate = decoded.sampleRate
             if (pcmData.isEmpty()) {
-                val reason = "在线合成未产出PCM（非空句），$bag"
+                val reason = """
+                    ┌ ----------------------------
+                    | 合成[在线]句子得到空PCM
+                    | bag: $bag,
+                    | 实际文本: "$trimmed"
+                    └ ----------------------------
+                """.trimIndent()
                 AppLogger.w(TAG, reason, important = true)
                 return SynthesisResult.Failure(reason)
             }
 
             val duration = System.currentTimeMillis() - start
-            AppLogger.d(TAG, "在线合成句子 $bag 成功，PCM 大小=${pcmData.size}, 采样率=$sampleRate, 耗时：$duration ms, 句子：$trimmed", important = true)
+            val msg = """
+                ┌ ----------------------------
+                | 合成[在线]句子完成
+                | bag: $bag,
+                | 实际文本: "$trimmed"
+                | PCM 大小: ${pcmData.size},
+                | 采样率: $sampleRate,
+                | 耗时: $duration ms
+                └ ----------------------------
+            """.trimIndent()
+            AppLogger.d(TAG, msg, important = true)
 
             enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.ONLINE) {
                 if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, sentence, SynthesisMode.ONLINE, startPos = bag.start, endPos = bag.end))
@@ -1199,7 +1235,15 @@ class TtsSynthesizer(
             return SynthesisResult.Success
         } catch (e: WxApiException) {
             val code = e.errorCode
-            val reason = "合成[在线] (句子 $bag)失败: ${e.message}, code=$code"
+            val reason = """
+                ┌ ----------------------------
+                | 合成[在线]句子失败
+                | bag: $bag,
+                | 实际文本: "$trimmed"
+                | 错误码: $code
+                | 错误信息: ${e.message}
+                └ ----------------------------
+            """.trimIndent()
             AppLogger.e(TAG, reason, important = true)
             currentCallback?.onSynthesisError(
                 mode = SynthesisMode.ONLINE,
@@ -1213,7 +1257,14 @@ class TtsSynthesizer(
             }
             return SynthesisResult.Failure(reason)
         } catch (e: Exception) {
-            val reason = "合成[在线] (句子 $bag)失败: ${e.message}"
+            val reason = """
+                ┌ ----------------------------
+                | 合成[在线]句子失败
+                | bag: $bag,
+                | 实际文本: "$trimmed"
+                | 异常信息: ${e.message}
+                └ ----------------------------
+            """.trimIndent()
             if (e !is ForbiddenNetworkException && e !is CancellationException) {
                 currentCallback?.onSynthesisError(
                     mode = SynthesisMode.ONLINE,
@@ -1249,7 +1300,17 @@ class TtsSynthesizer(
                     return@withLock SynthesisResult.Deferred
                 }
                 if (trimmed.isOnlyPunctuationOrEmpty()) {
-                    AppLogger.w(TAG, "句子 $bag 无有效内容，跳过离线合成。", important = true)
+                    AppLogger.w(
+                        TAG,
+                        msg = """
+                            ┌ ----------------------------
+                            | 合成[离线]句子无有效内容，跳过合成
+                            | bag: $bag, 
+                            | 实际文本: "$trimmed"
+                            └ ----------------------------
+                        """.trimIndent(),
+                        important = true
+                    )
                     enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.OFFLINE) {
                         if (isSessionActive()) sendCommand(Command.InternalSentenceStart(index, sentence, SynthesisMode.OFFLINE, bag.start, bag.end))
                     }
@@ -1258,8 +1319,17 @@ class TtsSynthesizer(
                     }
                     return@withLock SynthesisResult.Success
                 }
-
-                AppLogger.d(TAG, "合成[离线]句子 $bag", important = true)
+                AppLogger.d(
+                    TAG,
+                    """
+                        ┌ ----------------------------
+                        | 合成[离线]句子开始
+                        | bag: $bag, 
+                        | 实际文本: "$trimmed"
+                        └ ----------------------------
+                    """.trimIndent(),
+                    important = true
+                )
 
                 val predicted = predictTotalSamplesScaled(
                     text = trimmed,
@@ -1275,8 +1345,15 @@ class TtsSynthesizer(
 
                 val prepare = prepareForSynthesis(trimmed, currentSpeed, currentVolume)
                 if (prepare != 0) {
-                    val reason = "合成[离线]句子准备失败 (code=$prepare) 句子: $bag"
-                    AppLogger.e(TAG, "prepare 失败：$reason（按成功跳过处理，避免打断整体流程）")
+                    val reason = """
+                        ┌ ----------------------------
+                        | 合成[离线]句子准备失败（按成功跳过处理，避免打断整体流程）
+                        | bag: $bag, 
+                        | 实际文本: "$trimmed"
+                        | 准备状态码: $prepare
+                        └ ----------------------------
+                    """.trimIndent()
+                    AppLogger.e(TAG, reason, important = true)
                     currentCallback?.onSynthesisError(
                         mode = SynthesisMode.OFFLINE,
                         errorCode = prepare,
@@ -1313,13 +1390,20 @@ class TtsSynthesizer(
 
                     val status = nativeEngine?.synthesize(pcmArray, TtsConstants.PCM_BUFFER_SIZE, synthResult, 1) ?: -1
                     if (status == -1) {
-                        val reason = "合成[离线]句子合成失败，状态码: -1"
                         currentCallback?.onSynthesisError(
                             mode = SynthesisMode.OFFLINE,
                             errorMessage = "离线synthesize失败",
                             errorCode = status,
                             sentence = trimmed
                         )
+                        val reason = """
+                            ┌ ----------------------------
+                            | 合成[离线]句子合成失败
+                            | bag: $bag, 
+                            | 实际文本: "$trimmed"
+                            | 状态码: $status
+                            └ ----------------------------
+                        """.trimIndent()
                         AppLogger.e(TAG, reason, important = true)
                         return@withLock SynthesisResult.Success
                     }
@@ -1346,7 +1430,14 @@ class TtsSynthesizer(
                     }
                     delay(1)
                 }
-                AppLogger.d(TAG, "离线合成句子 $bag 完成。 句子：$trimmed", important = true)
+                val msg = """
+                    ┌ ----------------------------
+                    | 合成[离线]句子完成
+                    | bag: $bag, 
+                    | 实际文本: "$trimmed"
+                    └ ----------------------------
+                """.trimIndent()
+                AppLogger.d(TAG, msg, important = true)
                 if (coroutineContext.isActive && isSessionActive()) {
                     if (!hasStart) {
                         enqueueMarkerGuarded(index, AudioPlayer.MarkerType.SENTENCE_START, SynthesisMode.OFFLINE, startCb)
@@ -1357,7 +1448,14 @@ class TtsSynthesizer(
             } catch (e: CancellationException) {
                 SynthesisResult.Failure("合成[离线](句子 $bag, ${sentence.trim()})协程被取消")
             } catch (e: Exception) {
-                val reason = "合成[离线](句子 $bag)异常: ${e.message}"
+                val reason = """
+                    ┌ ----------------------------
+                    | 合成[离线]句子异常
+                    | bag: $bag,
+                    | 实际文本: "$trimmed"
+                    | 异常信息: ${e.message}
+                    └ ----------------------------
+                """.trimIndent()
                 AppLogger.e(TAG, reason, e, important = true)
                 currentCallback?.onSynthesisError(
                     mode = SynthesisMode.OFFLINE,
