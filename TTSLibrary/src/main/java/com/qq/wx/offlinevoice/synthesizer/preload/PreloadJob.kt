@@ -8,6 +8,8 @@ import com.qq.wx.offlinevoice.synthesizer.Speaker
 import com.qq.wx.offlinevoice.synthesizer.TtsRepository
 import com.qq.wx.offlinevoice.synthesizer.TtsSynthesizer
 import com.qq.wx.offlinevoice.synthesizer.isOnlyPunctuationOrEmpty
+import com.qq.wx.offlinevoice.synthesizer.normalizer.SimplifiedTtsNormalizer
+import com.qq.wx.offlinevoice.synthesizer.normalizer.TraditionalTtsNormalizer
 import com.qq.wx.offlinevoice.synthesizer.online.WxApiException
 import com.qq.wx.offlinevoice.synthesizer.processForTts
 import kotlinx.coroutines.CancellationException
@@ -34,7 +36,8 @@ internal class PreloadJob(
     private val speaker: Speaker,
     private val splitterStrategy: SentenceSplitterStrategy,
     private val concurrencyLimit: Int, // 从构造函数接收并发数
-    private val onCompletion: (Result<Unit>) -> Unit
+    private val isTtsTextTraditional: Boolean,
+    private val onCompletion: (Result<Unit>) -> Unit,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -75,7 +78,7 @@ internal class PreloadJob(
 
         pendingBags.asFlow()
             .map { bag ->
-                val processedText = bag.text.trim().processForTts()
+                val processedText = processTextForTts(bag.text)
                 Triple(bag, processedText, processedText.isOnlyPunctuationOrEmpty())
             }
             .transform { (bag, text, isInvalid) ->
@@ -132,6 +135,16 @@ internal class PreloadJob(
                 }
             }
             .launchIn(scope)
+    }
+
+    private fun processTextForTts(input: String): String {
+        var text = input.trim().processForTts()
+        text = if (isTtsTextTraditional) {
+            TraditionalTtsNormalizer.process(text)
+        } else {
+            SimplifiedTtsNormalizer.process(text)
+        }
+        return text
     }
 
     fun cancel(reason: String) {

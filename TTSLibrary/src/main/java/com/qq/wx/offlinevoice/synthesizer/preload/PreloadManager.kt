@@ -108,6 +108,7 @@ class PreloadManager private constructor(
     fun preload(
         content: String,
         speaker: Speaker,
+        isTtsTextTraditional: Boolean = false,
         sentenceSplitterStrategy: SentenceSplitterStrategy = SentenceSplitterStrategy.NEWLINE,
         onCompletion: ((Result<Unit>) -> Unit)? = null
     ) {
@@ -127,6 +128,7 @@ class PreloadManager private constructor(
             speaker = speaker,
             splitterStrategy = sentenceSplitterStrategy,
             concurrencyLimit = config.defaultConcurrencyLimit,
+            isTtsTextTraditional = isTtsTextTraditional,
             onCompletion = { result ->
                 // 当任务完全成功或被取消时，从 map 中移除
                 jobs.remove(id)
