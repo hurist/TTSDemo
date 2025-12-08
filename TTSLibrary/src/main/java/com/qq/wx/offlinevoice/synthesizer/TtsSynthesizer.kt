@@ -1475,7 +1475,8 @@ class TtsSynthesizer(
         text = if (isTtsTextTraditional) {
             TraditionalTtsNormalizer.process(text)
         } else {
-            SimplifiedTtsNormalizer.process(text)
+            //SimplifiedTtsNormalizer.process(text)
+            text
         }
         return text
     }
