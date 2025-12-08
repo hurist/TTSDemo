@@ -1,6 +1,6 @@
 package com.qq.wx.offlinevoice.synthesizer.normalizer
 
-import android.icu.text.BreakIterator
+import java.text.BreakIterator
 import java.util.Locale
 import java.util.regex.Matcher
 import java.util.regex.Pattern
