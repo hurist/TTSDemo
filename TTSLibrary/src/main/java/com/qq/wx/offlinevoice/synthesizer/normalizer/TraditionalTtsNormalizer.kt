@@ -1,48 +1,32 @@
 package com.qq.wx.offlinevoice.synthesizer.normalizer
 
+import android.icu.text.BreakIterator
+import java.util.Locale
 import java.util.regex.Matcher
 import java.util.regex.Pattern
+import kotlin.math.max
+import kotlin.math.min
 
 /**
- * **TTS 繁體文本標準化處理器 (Ultimate Edition)**
+ * TTS 繁體文本標準化處理器 (Ultimate Edition, Token Merge)
  *
- * 此工具用於在將文本發送給 TTS (Text-To-Speech) 引擎之前，進行預處理矯正。
- * 主要解決繁體中文環境下，TTS 引擎常見的多音字錯誤、異體字識別困難以及語義分化讀音問題。
+ * - 使用 BreakIterator 做基礎分詞
+ * - 滑動窗口「最長優先」合併相鄰 token 命中：
+ *   1) RAW_WORD_REPLACEMENTS（命中即替換，長度恆定）
+ *   2) ZHU_ALLOW_LIST（命中則保留原樣，避免 fallback 將「著」->「着」）
+ * - 不跨越空白/標點/符號等「合併屏障」
+ * - 未命中時對單個 token 做「著」兜底與單字異體清洗（長度恆定）
  *
- * ### 核心設計原則：
- * 1. **長度恆定 (Invariant Length)**：
- *    所有替換必須嚴格遵守 **1對1** 原則（字數不變）。
- *    - 目的：確保處理後的文本與原始文本長度一致，從而保證閱讀器（Reader）的高亮（Karaoke）光標定位準確。
- *
- * 2. **同音字引導 (Homophone Substitution)**：
- *    利用 TTS 引擎對簡體或特定同音字的發音權重，強制鎖定正確讀音。
- *    - 例：「執著」 (TTS 常誤讀 zhe) -> 替換為「執卓」 (強制讀 zhuó)。
- *
- * 3. **特例優先 (Longest Match First)**：
- *    在替換時，優先匹配長詞，避免短詞規則誤傷長詞。
- *    - 例：優先匹配「沈著冷靜」，後匹配「沈著」。
- *
+ * 注意：isDebug=true 僅用於開發調試，會在每個輸出單元外加 [ ]，從而打破「長度恆定」原則，請勿用於生產朗讀。
  */
 object TraditionalTtsNormalizer {
 
-    // ==========================================
-    // 1. 「著」字讀音保護白名單 (讀 zhù)
-    // ==========================================
-    /**
-     * **白名單列表**：定義了「著」字應讀作 **zhù** (名詞/動詞：著作、顯著) 的情況。
-     *
-     * 處理邏輯：
-     * - 在 `process` 方法的正則步驟中，這些詞會被匹配並**保留原字**。
-     * - 不在此列表、且未被下方 `RAW_WORD_REPLACEMENTS` 替換掉的「著」，
-     *   將一律被視為助詞，替換為 **「着」** (讀 zhe)。
-     */
+    // 1) 「著」字讀音保護白名單（讀 zhù）
     private val ZHU_ALLOW_LIST = listOf(
-        // 名詞/動詞性詞彙
         "著名", "著作", "顯著", "土著", "原著", "名著",
         "專著", "拙著", "遺著", "譯著", "編著", "論著",
         "昭著", "卓著", "著述", "著稱", "著錄", "著書",
         "巨著", "撰著", "較著", "著者", "合著",
-        // 成語類
         "見微知著", "視微知著", "識微知著", "以微知著", "睹微知著",
         "積微成著", "積微致著", "日新月著", "威望素著",
         "臭名昭著", "劣跡昭著", "惡跡昭著", "昭然著聞", "遐邇著聞",
@@ -53,35 +37,15 @@ object TraditionalTtsNormalizer {
         "超超玄著", "著之竹帛", "著乎竹帛", "著於竹帛"
     )
 
-    /**
-     * 預編譯正則表達式，用於高效匹配白名單。
-     * 策略：(白名單詞彙) | (其他所有的著)
-     */
+    // (白名單)|(其他所有的著)
     private val ZHU_PATTERN: Pattern by lazy {
-        // 按長度降序排序，確保 "著書立說" 不會被 "著書" 截斷
         val sorted = ZHU_ALLOW_LIST.sortedByDescending { it.length }
         Pattern.compile("(${sorted.joinToString("|")})|(著)")
     }
 
-    // ==========================================
-    // 2. 精準詞彙替換表 (核心邏輯)
-    // ==========================================
-    /**
-     * **強制替換映射表**：Key (原詞) -> Value (替換詞)。
-     *
-     * 注意事項：
-     * 1. **Key 與 Value 長度必須相等**。
-     * 2. 使用同音字（或近音字）來「欺騙」TTS 引擎發出正確的聲音。
-     *    - 卓 (zhuó) 代替 著 (zhuó)
-     *    - 招 (zháo) 代替 著 (zháo)
-     *    - 干 (gān) 代替 乾 (gān) -> 區分 乾坤(qián)
-     *    - 误 (wù) 代替 惡 (wù) -> 區分 兇惡(è)
-     */
+    // 2) 精準詞彙替換表（鍵值長度需相等）
     private val RAW_WORD_REPLACEMENTS = mapOf(
-        // -------------------------------------------------------
-        // Level 1: 「著」的多音字分化 (Zhuó / Zháo)
-        // -------------------------------------------------------
-        // [讀 Zhuó -> 卓]
+        // 「著」 Zhuó/Zháo
         "執著" to "執卓", "膠著" to "膠卓", "著陸" to "卓陸",
         "著想" to "卓想", "著手" to "卓手", "著眼" to "卓眼",
         "著力" to "卓力", "著重" to "卓重", "著落" to "卓落",
@@ -96,16 +60,12 @@ object TraditionalTtsNormalizer {
         "魂不著體" to "魂不卓体", "水中著鹽" to "水中卓盐",
         "吃衣著飯" to "吃衣卓饭", "眼不著砂" to "眼不卓砂",
         "上不著天" to "上不卓天",
-
-        // [讀 Zháo -> 招]
+        // Zháo -> 招
         "著急" to "招急", "著火" to "招火", "著涼" to "招涼",
         "著魔" to "招魔", "著迷" to "招迷", "著慌" to "招慌",
         "乾著急" to "干招急", "一度著蛇咬" to "一度招蛇咬",
 
-        // -------------------------------------------------------
-        // Level 2: 「乾」的多音字分化 (Gān / Qián)
-        // 策略：所有讀 gān 的詞替換為簡體「干」，保留讀 qián (乾坤) 的詞不變。
-        // -------------------------------------------------------
+        // 「乾」 Gān/Qián -> Gān 用「干」
         "乾燥" to "干燥", "乾杯" to "干杯", "乾洗" to "干洗",
         "乾冰" to "干冰", "乾果" to "干果", "乾糧" to "干粮",
         "乾旱" to "干旱", "乾淨" to "干净", "乾脆" to "干脆",
@@ -114,14 +74,10 @@ object TraditionalTtsNormalizer {
         "乾貨" to "干货", "乾麵" to "干面", "乾笑" to "干笑",
         "乾瞪眼" to "干瞪眼", "乾乾淨淨" to "干干净净",
         "相干" to "相干", "不相干" to "不相干", "乾涉" to "干涉", "乾擾" to "干扰",
-        // 親屬稱謂
         "乾爹" to "干爹", "乾媽" to "干妈", "乾兒子" to "干儿子",
         "乾女兒" to "干女儿", "乾妹" to "干妹", "乾親" to "干亲",
 
-        // -------------------------------------------------------
-        // Level 3: 「沈」的繁簡分化 (Chén / Shěn)
-        // 策略：繁體「沈」可讀 Shěn (姓氏) 或 Chén (沉)，此處強制轉為「沉」。
-        // -------------------------------------------------------
+        // 「沈」 -> 「沉」
         "沈默" to "沉默", "沈重" to "沉重", "沈澱" to "沉淀",
         "沈迷" to "沉迷", "沈沒" to "沉没", "深沈" to "深沉",
         "沈思" to "沉思", "沈睡" to "沉睡", "沈積" to "沉积",
@@ -131,60 +87,39 @@ object TraditionalTtsNormalizer {
         "沈浸" to "沉浸", "沈穩" to "沉稳", "消沈" to "消沉",
         "沈甸甸" to "沉甸甸",
 
-        // -------------------------------------------------------
-        // Level 4: 「惡」的多音字分化 (Wù / È)
-        // 策略：表示「討厭」時讀 wù，替換為「誤」；表示「壞」時讀 è (保持不變)。
-        // -------------------------------------------------------
+        // 「惡」 Wù/È -> Wù 用「误」
         "可惡" to "可误", "厭惡" to "厌误",
         "好逸惡勞" to "好逸误劳", "深惡痛絕" to "深误痛绝",
         "交惡" to "交误", "憎惡" to "憎误", "羞惡" to "羞误",
 
-        // -------------------------------------------------------
-        // Level 5: 高頻多音字核心修正
-        // -------------------------------------------------------
-        // 校 (jiào -> 叫)
+        // 高頻多音字
         "校對" to "叫对", "校正" to "叫正", "校樣" to "叫样",
         "校訂" to "叫订", "校驗" to "叫验", "校勘" to "叫勘", "校準" to "叫准",
-        // 給 (jǐ -> 挤)
         "給予" to "挤予", "給養" to "挤养", "供給" to "供挤",
-        // 埋 (mán -> 蛮)
         "埋怨" to "蛮怨",
-        // 稱 (chèn -> 趁)
         "稱職" to "趁职", "稱心" to "趁心", "對稱" to "对趁", "相稱" to "相趁",
-        // 創 (chuāng -> 窗)
         "創傷" to "窗伤", "重創" to "重窗", "創口" to "窗口",
-        // 頸 (gěng -> 梗)
         "脖頸" to "脖梗",
-        // 臭 (xiù -> 秀)
         "乳臭" to "乳秀", "銅臭" to "铜秀",
-        // 遂 (suí -> 随)
         "不遂" to "不随", "半身不遂" to "半身不随",
-        // 艾 (yì -> 意)
         "自艾" to "自意",
-        // 脈 (mò -> 莫)
         "脈脈" to "莫莫",
-        // 炮 (páo -> 袍)
         "炮製" to "袍制", "炮烙" to "袍烙",
-        // 拓 (tà -> 踏)
         "拓本" to "踏本", "拓片" to "踏片",
-        // 說 (shuì -> 税)
         "遊說" to "游税", "說客" to "税客",
-        // 薄 (bò -> 博)
         "薄荷" to "博荷",
-        // 粘/黏 (nián -> 年)
         "粘貼" to "年贴", "黏貼" to "年贴",
-        // 處 (chǔ -> 楚)
         "設身處地" to "设身楚地",
-        // 寧 (nìng -> 佞)
         "寧可" to "佞可", "寧願" to "佞愿",
 
-        // -------------------------------------------------------
-        // Level 6: 常用多音字 (日常會話)
-        // -------------------------------------------------------
+        // 常用多音
         "憑藉" to "凭借", "慰藉" to "慰借",
         "瞭解" to "了解", "明瞭" to "明了", "瞭若指掌" to "了若指掌",
-        "銀行" to "银行", "行長" to "行长", "行業" to "行业", //"行為" to "行为",
-        "音樂" to "音乐", "樂隊" to "乐队", "樂章" to "乐章", //"快樂" to "快乐",
+        "銀行" to "银行", "行長" to "行长", "行業" to "行业",
+        "擅長" to "擅常", "長處" to "常处", "長短" to "常短",
+        "長久" to "常久", "長期" to "常期", "長遠" to "常远",
+        "長度" to "常度", "長篇" to "常篇",
+        "音樂" to "音乐", "樂隊" to "乐队", "樂章" to "乐章",
         "重疊" to "崇叠", "重逢" to "崇逢", "重申" to "崇申",
         "重寫" to "崇写", "重來" to "崇来",
         "重整" to "崇整", "重塑" to "崇塑",
@@ -196,21 +131,17 @@ object TraditionalTtsNormalizer {
         "盛飯" to "成饭", "盛湯" to "成汤", "盛滿" to "成满",
         "協調" to "协调", "強調" to "强调",
         "人參" to "人参",
-        "佔卜" to "占卜",
+        "佔卜" to "占卜", "櫃台" to "柜台",
 
-        // -------------------------------------------------------
-        // Level 7: 異體字/特殊寫法標準化
-        // -------------------------------------------------------
-        "災難" to "灾难", "責難" to "责难", "難民" to "难民",
+        // 異體/標準化
+        "災難" to "灾难", "責難" to "责難", "難民" to "难民",
         "空難" to "空难", "遇難" to "遇难", "發難" to "发难",
         "落難" to "落难", "磨難" to "磨难", "劫難" to "劫难",
         "患難" to "患难", "避難" to "避难",
         "覆蓋" to "覆盖", "計畫" to "计划",
         "儘管" to "尽管", "儘快" to "尽快",
 
-        // -------------------------------------------------------
-        // Level 8: 宗教、玄幻、古文與成語 (TTS 盲區)
-        // -------------------------------------------------------
+        // 宗教/古文
         "南無" to "拿摩", "般若" to "拨惹",
         "伽藍" to "茄蓝", "楞伽" to "楞茄",
         "舍利" to "设利",
@@ -223,19 +154,14 @@ object TraditionalTtsNormalizer {
         "間不容髮" to "见不容发",
         "一暴十寒" to "一铺十寒", "咋舌" to "责舌",
 
-        // -------------------------------------------------------
-        // Level 9: 地名、姓氏
-        // -------------------------------------------------------
-        "台州" to "胎州", "天台山" to "天胎山", "麗水" to "梨水",
+        // 地名/姓氏
         "六安" to "陆安", "六合" to "陆合", "鉛山" to "盐山",
         "番禺" to "潘禺", "廈門" to "下门", "亳州" to "伯州",
         "閔行" to "闵杭", "涪陵" to "扶陵", "國子監" to "国子见",
         "萬俟" to "莫奇", "令狐" to "零狐", "尉遲" to "玉迟",
         "單于" to "缠于", "單縣" to "善县",
 
-        // -------------------------------------------------------
-        // Level 10: 雜項與冷門詞彙
-        // -------------------------------------------------------
+        // 雜項
         "一石" to "一蛋", "萬石" to "万蛋",
         "會計" to "快计", "財會" to "财快",
         "華山" to "画山", "華髮" to "花发",
@@ -250,32 +176,10 @@ object TraditionalTtsNormalizer {
         "貧血" to "贫雪", "心血" to "心雪", "狗血" to "狗雪",
         "殷紅" to "嫣红", "秘魯" to "必鲁",
         "復辟" to "复避", "執拗" to "执牛",
-        "鑽石" to "攥石", "鑽頭" to "攥头"
+        "鑽石" to "攥石", "鑽頭" to "攥头",
     )
 
-    /**
-     * **有序替換列表**：
-     * 將 `RAW_WORD_REPLACEMENTS` 轉換為 List 並按 Key 長度降序排列。
-     *
-     * 作用：
-     * 確保 **長詞優先匹配** (Longest Match First)。
-     * 例：若同時存在「沈著」和「沈著冷靜」，必須先處理「沈著冷靜」，
-     * 否則「沈著」會先被替換，導致長詞被切斷。
-     */
-    private val SORTED_WORD_REPLACEMENTS: List<Pair<String, String>> by lazy {
-        RAW_WORD_REPLACEMENTS.entries
-            .sortedByDescending { it.key.length }
-            .map { it.key to it.value }
-    }
-
-    // ==========================================
-    // 3. 單字級異體修復 (Cleanup)
-    // ==========================================
-    /**
-     * **單字替換表**：
-     * 用於處理前面 Map 未覆蓋到的、或 TTS 可能識別困難的孤立異體字。
-     * 這些字通常有一對一的簡體或通用繁體對應字。
-     */
+    // 3) 單字級異體清洗（1:1）
     private val CHAR_REPLACEMENTS = mapOf(
         '祕' to '秘', '爲' to '為', '恆' to '恒', '峯' to '峰',
         '廄' to '厩', '牀' to '床', '線' to '线', '慾' to '欲',
@@ -287,54 +191,155 @@ object TraditionalTtsNormalizer {
         '髮' to '发', '藝' to '艺', '鑒' to '鉴', '鑑' to '鉴',
         '繫' to '系', '嚮' to '向', '廣' to '广', '賬' to '账',
         '雲' to '云', '裝' to '装', '喫' to '吃', '軟' to '软',
-        '穀' to '谷', '臟' to '脏', '惡' to '恶'
+        '穀' to '谷', '臟' to '脏', '惡' to '恶', '從' to '从',
+        '學' to '学', '衞' to '卫', '衛' to '卫', '藥' to '药',
+        '醫' to '医', '處' to '处', '勢' to '势', '藝' to '艺',
+        '長' to '长', '櫃' to '柜', '許' to '许', '續' to '续',
+        '鬥' to '斗', '鬧' to '闹', '際' to '际', '舊' to '旧',
     )
 
-    /**
-     * **執行文本標準化處理**
-     *
-     * 處理流程：
-     * 1. **詞彙遍歷替換**：按長度優先順序，掃描並替換 Map 中的多音字詞組。
-     * 2. **「著」字邏輯修正**：使用正則區分「著名」(保留著) 與「看著」(變為着)。
-     * 3. **單字清洗**：快速掃描字符數組，統一異體字。
-     *
-     * @param text 原始繁體文本
-     * @return 處理後的可朗讀文本（字數與原始文本嚴格一致）
-     */
-    fun process(text: String): String {
-        if (text.isEmpty()) return text
-        var currentText = text
+    // ————————————————————
+    // 合併屏障與最大合併長度
+    // ————————————————————
+    private fun isBarrierChar(c: Char): Boolean {
+        if (c.isWhitespace()) return true
+        return when (Character.getType(c).toByte()) {
+            Character.SPACE_SEPARATOR,
+            Character.LINE_SEPARATOR,
+            Character.PARAGRAPH_SEPARATOR,
+            Character.DASH_PUNCTUATION,
+            Character.START_PUNCTUATION,
+            Character.END_PUNCTUATION,
+            Character.CONNECTOR_PUNCTUATION,
+            Character.OTHER_PUNCTUATION,
+            Character.MATH_SYMBOL,
+            Character.CURRENCY_SYMBOL,
+            Character.MODIFIER_SYMBOL,
+            Character.OTHER_SYMBOL -> true
+            else -> false
+        }
+    }
 
-        // Step 1: 執行精準詞彙替換
-        // 由於列表已按長度降序排列，可安全處理包含關係（如 A包含B，A會先被替換）。
-        for ((k, v) in SORTED_WORD_REPLACEMENTS) {
-            if (currentText.contains(k)) {
-                currentText = currentText.replace(k, v)
+    private fun isMergeBarrier(token: String): Boolean = token.any(::isBarrierChar)
+
+    // 根據表與白名單自動計算最大合併長度（以字元計）
+    private val MAX_MERGE_COUNT: Int by lazy {
+        val mapMax = RAW_WORD_REPLACEMENTS.keys.maxOfOrNull { it.length } ?: 1
+        val allowMax = ZHU_ALLOW_LIST.maxOfOrNull { it.length } ?: 1
+        max(mapMax, allowMax)
+    }
+
+    // ————————————————————
+    // 主處理流程（含滑窗合併）
+    // ————————————————————
+    fun process(text: String, isDebug: Boolean = false): String {
+        if (text.isEmpty()) return text
+
+        // 1) 切分 tokens
+        val tokens = ArrayList<String>()
+        val iterator = BreakIterator.getWordInstance(Locale.TRADITIONAL_CHINESE)
+        iterator.setText(text)
+        var start = iterator.first()
+        var end = iterator.next()
+        while (end != BreakIterator.DONE) {
+            tokens.add(text.substring(start, end))
+            start = end
+            end = iterator.next()
+        }
+
+        val out = StringBuilder(text.length)
+        var i = 0
+        while (i < tokens.size) {
+            var matched = false
+
+            // 2) 最長優先的滑窗合併（不穿越屏障）
+            val hardMax = min(i + MAX_MERGE_COUNT, tokens.size)
+            var j = hardMax
+            outer@ while (j > i) {
+                var k = i
+                var sbTemp: StringBuilder? = null
+
+                // 逐個擴張，遇屏障即止
+                while (k < j) {
+                    val tk = tokens[k]
+                    if (k > i && isMergeBarrier(tokens[k - 1])) break
+                    if (isMergeBarrier(tk)) break
+                    if (sbTemp == null) sbTemp = StringBuilder()
+                    sbTemp.append(tk)
+                    k++
+                }
+
+                // 縮到實際可達位置
+                if (k < j) {
+                    j = k
+                    if (j <= i) break
+                    continue
+                }
+
+                val candidate = sbTemp?.toString().orEmpty()
+                if (candidate.isNotEmpty()) {
+                    // 2.1 命中強替表：直接替換
+                    RAW_WORD_REPLACEMENTS[candidate]?.let { replacement ->
+                        if (isDebug) out.append('[').append(replacement).append(']')
+                        else out.append(replacement)
+                        i = j
+                        matched = true
+                        break@outer
+                    }
+
+                    // 2.2 命中「著」白名單：原樣保留（避免 fallback 誤把「著」->「着」）
+                    if (ZHU_ALLOW_LIST.contains(candidate)) {
+                        if (isDebug) out.append('[').append(candidate).append(']')
+                        else out.append(candidate)
+                        i = j
+                        matched = true
+                        break@outer
+                    }
+                }
+
+                j-- // 縮短，嘗試更短的合併
+            }
+
+            // 3) 未命中：單 token 兜底（「著」處理 + 單字清洗）
+            if (!matched) {
+                val t = processTokenFallback(tokens[i])
+                if (isDebug) out.append('[').append(t).append(']') else out.append(t)
+                i++
             }
         }
 
-        // Step 2: 處理剩餘的「著」字
-        // 此時讀 zhuó/zháo 的詞已被 Step 1 替換走了。
-        // 剩下的要麼是白名單裡的 (讀 zhù)，要麼是助詞 (讀 zhe)。
-        val m = ZHU_PATTERN.matcher(currentText)
-        if (m.find()) {
-            val sb = StringBuffer()
-            do {
-                if (m.group(1) != null) {
-                    // 情況 A: 命中白名單 (如 "著名") -> 保持 "著" (TTS 讀 zhù)
-                    m.appendReplacement(sb, Matcher.quoteReplacement(m.group(1)))
-                } else if (m.group(2) != null) {
-                    // 情況 B: 未命中白名單，單獨的 "著" -> 替換為 "着" (TTS 讀 zhe)
-                    m.appendReplacement(sb, "着")
-                }
-            } while (m.find())
-            m.appendTail(sb)
-            currentText = sb.toString()
+        return out.toString()
+    }
+
+    /**
+     * Token 兜底：處理「著」與單字異體（保持長度恆定）
+     */
+    private fun processTokenFallback(word: String): String {
+        if (word.isBlank()) return word
+
+        var currentWord = word
+
+        // 3.1 「著」兜底：白名單保留，其餘「著」->「着」
+        if (currentWord.contains("著")) {
+            val m = ZHU_PATTERN.matcher(currentWord)
+            if (m.find()) {
+                val sb = StringBuffer()
+                do {
+                    if (m.group(1) != null) {
+                        // 命中白名單片段（如「著名」）：原樣保留
+                        m.appendReplacement(sb, Matcher.quoteReplacement(m.group(1)))
+                    } else if (m.group(2) != null) {
+                        // 其餘「著」視為助詞 -> 「着」
+                        m.appendReplacement(sb, "着")
+                    }
+                } while (m.find())
+                m.appendTail(sb)
+                currentWord = sb.toString()
+            }
         }
 
-        // Step 3: 單字級異體字清洗
-        // 使用 CharArray 進行 O(N) 遍歷，性能最高，適合處理零散字符。
-        val arr = currentText.toCharArray()
+        // 3.2 單字異體清洗（1:1 替換）
+        val arr = currentWord.toCharArray()
         var changed = false
         for (i in arr.indices) {
             CHAR_REPLACEMENTS[arr[i]]?.let {
@@ -343,6 +348,6 @@ object TraditionalTtsNormalizer {
             }
         }
 
-        return if (changed) String(arr) else currentText
+        return if (changed) String(arr) else currentWord
     }
 }
