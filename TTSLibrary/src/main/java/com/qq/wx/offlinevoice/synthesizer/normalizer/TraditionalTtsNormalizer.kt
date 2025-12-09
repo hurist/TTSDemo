@@ -52,7 +52,7 @@ object TraditionalTtsNormalizer {
         "著裝" to "卓裝", "著緊" to "卓緊", "著墨" to "卓墨",
         "著色" to "卓色", "著筆" to "卓筆", "沉著" to "沉卓",
         "沈著" to "沉卓", "沈著冷靜" to "沉卓冷静",
-        "著實" to "卓实",
+        "著實" to "卓实", "看著" to "看着",
         "佛頭著糞" to "佛头卓粪", "畫蛇著足" to "画蛇卓足",
         "棋輸先著" to "棋输先卓", "一鞭先著" to "一鞭先卓",
         "先吾著鞭" to "先吾卓鞭", "瀉水著地" to "泻水卓地",
@@ -63,7 +63,8 @@ object TraditionalTtsNormalizer {
         // Zháo -> 招
         "著急" to "招急", "著火" to "招火", "著涼" to "招涼",
         "著魔" to "招魔", "著迷" to "招迷", "著慌" to "招慌",
-        "乾著急" to "干招急", "一度著蛇咬" to "一度招蛇咬",
+        "乾著急" to "干着急", "一度著蛇咬" to "一度招蛇咬",
+        "干著急" to "干招急",
 
         // 「乾」 Gān/Qián -> Gān 用「干」
         "乾燥" to "干燥", "乾杯" to "干杯", "乾洗" to "干洗",
@@ -89,7 +90,7 @@ object TraditionalTtsNormalizer {
 
         // 「惡」 Wù/È -> Wù 用「误」
         "可惡" to "可误", "厭惡" to "厌误",
-        "好逸惡勞" to "好逸误劳", "深惡痛絕" to "深误痛绝",
+        "好逸惡勞" to "好逸恶劳", "深惡痛絕" to "深误痛绝",
         "交惡" to "交误", "憎惡" to "憎误", "羞惡" to "羞误",
 
         // 高頻多音字
@@ -158,16 +159,15 @@ object TraditionalTtsNormalizer {
         "番禺" to "潘禺", "廈門" to "下门", "亳州" to "伯州",
         "閔行" to "闵杭", "涪陵" to "扶陵", "國子監" to "国子见",
         "萬俟" to "莫奇", "令狐" to "零狐", "尉遲" to "玉迟",
-        "單于" to "缠于", "單縣" to "善县",
+        "單于" to "缠于", "單縣" to "善县", "麗水" to "利水",
 
         // 雜項
         "一石" to "一蛋", "萬石" to "万蛋",
         "會計" to "快计", "財會" to "财快",
         "華山" to "画山", "華髮" to "花发",
-        "地殼" to "地俏", "脫殼" to "脱俏", "甲殼" to "甲俏",
+        "地殼" to "地壳", "脫殼" to "脱俏", "甲殼" to "甲俏",
         "談吐" to "谈土", "吐露" to "土露",
         "嘔吐" to "偶兔", "上吐下瀉" to "上兔下泻",
-        "弄堂" to "龙堂", "里弄" to "里龙",
         "勉強" to "免抢", "強迫" to "抢迫", "強詞奪理" to "抢词夺理",
         "倔強" to "倔匠", "累贅" to "雷赘",
         "混水" to "浑水", "剝削" to "剥薛", "瘦削" to "瘦薛",
@@ -176,7 +176,8 @@ object TraditionalTtsNormalizer {
         "殷紅" to "嫣红", "秘魯" to "必鲁",
         "復辟" to "复避", "執拗" to "执牛",
         "鑽石" to "攥石", "鑽頭" to "攥头", "沉澱" to "沉淀",
-        "剛正不阿" to "刚正不阿",
+        "剛正不阿" to "刚正不阿", "組長" to "组长", "處長" to "处掌",
+        "乳臭未乾" to "乳臭未干"
     )
 
     // 3) 單字級異體清洗（1:1）
@@ -197,158 +198,116 @@ object TraditionalTtsNormalizer {
         '長' to '长', '櫃' to '柜', '許' to '许', '續' to '续',
         '鬥' to '斗', '鬧' to '闹', '際' to '际', '舊' to '旧',
         '遊' to '游', '悶' to '闷', '彌' to '弥', '廳' to '厅',
+        '紅' to '红',
+
     )
 
-    // ————————————————————
-    // 合併屏障與最大合併長度
-    // ————————————————————
-    private fun isBarrierChar(c: Char): Boolean {
-        if (c.isWhitespace()) return true
-        return when (Character.getType(c).toByte()) {
-            Character.SPACE_SEPARATOR,
-            Character.LINE_SEPARATOR,
-            Character.PARAGRAPH_SEPARATOR,
-            Character.DASH_PUNCTUATION,
-            Character.START_PUNCTUATION,
-            Character.END_PUNCTUATION,
-            Character.CONNECTOR_PUNCTUATION,
-            Character.OTHER_PUNCTUATION,
-            Character.MATH_SYMBOL,
-            Character.CURRENCY_SYMBOL,
-            Character.MODIFIER_SYMBOL,
-            Character.OTHER_SYMBOL -> true
-            else -> false
-        }
-    }
-
-    private fun isMergeBarrier(token: String): Boolean = token.any(::isBarrierChar)
-
-    // 根據表與白名單自動計算最大合併長度（以字元計）
-    private val MAX_MERGE_COUNT: Int by lazy {
+    // 根據詞典自動計算最大掃描窗口
+    private val MAX_SCAN_LENGTH: Int by lazy {
         val mapMax = RAW_WORD_REPLACEMENTS.keys.maxOfOrNull { it.length } ?: 1
         val allowMax = ZHU_ALLOW_LIST.maxOfOrNull { it.length } ?: 1
-        max(mapMax, allowMax)
+        kotlin.math.max(mapMax, allowMax)
     }
 
     // ————————————————————
-    // 主處理流程（含滑窗合併）
+    // 主處理邏輯
     // ————————————————————
     fun process(text: String, isDebug: Boolean = false): String {
         if (text.isEmpty()) return text
 
-        // 1) 切分 tokens
-        val tokens = ArrayList<String>()
+        val out = StringBuilder(text.length)
+
+        // 1. BreakIterator 分詞
         val iterator = BreakIterator.getWordInstance(Locale.TRADITIONAL_CHINESE)
         iterator.setText(text)
+
         var start = iterator.first()
         var end = iterator.next()
+
         while (end != BreakIterator.DONE) {
-            tokens.add(text.substring(start, end))
+            val token = text.substring(start, end)
+
+            // 標點符號和空白通常不是分詞邏輯的重點，不加花括號，保持閱讀流暢
+            if (token.isBlank() || isPunctuationOnly(token)) {
+                out.append(token)
+            } else {
+                // 【核心修改】
+                // 如果是 debug 模式，用 { } 包裹整個 Token，
+                // 這樣你就能看到 "長篇小說" 是被當作一個詞 {長篇小說} 還是兩個詞 {長篇}{小說}
+                if (isDebug) out.append("{")
+
+                processInsideToken(token, out, isDebug)
+
+                if (isDebug) out.append("}")
+            }
+
             start = end
             end = iterator.next()
         }
-
-        val out = StringBuilder(text.length)
-        var i = 0
-        while (i < tokens.size) {
-            var matched = false
-
-            // 2) 最長優先的滑窗合併（不穿越屏障）
-            val hardMax = min(i + MAX_MERGE_COUNT, tokens.size)
-            var j = hardMax
-            outer@ while (j > i) {
-                var k = i
-                var sbTemp: StringBuilder? = null
-
-                // 逐個擴張，遇屏障即止
-                while (k < j) {
-                    val tk = tokens[k]
-                    if (k > i && isMergeBarrier(tokens[k - 1])) break
-                    if (isMergeBarrier(tk)) break
-                    if (sbTemp == null) sbTemp = StringBuilder()
-                    sbTemp.append(tk)
-                    k++
-                }
-
-                // 縮到實際可達位置
-                if (k < j) {
-                    j = k
-                    if (j <= i) break
-                    continue
-                }
-
-                val candidate = sbTemp?.toString().orEmpty()
-                if (candidate.isNotEmpty()) {
-                    // 2.1 命中強替表：直接替換
-                    RAW_WORD_REPLACEMENTS[candidate]?.let { replacement ->
-                        if (isDebug) out.append('[').append(replacement).append(']')
-                        else out.append(replacement)
-                        i = j
-                        matched = true
-                        break@outer
-                    }
-
-                    // 2.2 命中「著」白名單：原樣保留（避免 fallback 誤把「著」->「着」）
-                    if (ZHU_ALLOW_LIST.contains(candidate)) {
-                        if (isDebug) out.append('[').append(candidate).append(']')
-                        else out.append(candidate)
-                        i = j
-                        matched = true
-                        break@outer
-                    }
-                }
-
-                j-- // 縮短，嘗試更短的合併
-            }
-
-            // 3) 未命中：單 token 兜底（「著」處理 + 單字清洗）
-            if (!matched) {
-                val t = processTokenFallback(tokens[i])
-                if (isDebug) out.append('[').append(t).append(']') else out.append(t)
-                i++
-            }
-        }
-
         return out.toString()
     }
 
     /**
-     * Token 兜底：處理「著」與單字異體（保持長度恆定）
+     * Token 內部深度處理函數
      */
-    private fun processTokenFallback(word: String): String {
-        if (word.isBlank()) return word
+    private fun processInsideToken(token: String, out: StringBuilder, isDebug: Boolean) {
+        val len = token.length
+        var i = 0
 
-        var currentWord = word
+        while (i < len) {
+            var matched = false
+            val maxCurrentScan = min(MAX_SCAN_LENGTH, len - i)
 
-        // 3.1 「著」兜底：白名單保留，其餘「著」->「着」
-        if (currentWord.contains("著")) {
-            val m = ZHU_PATTERN.matcher(currentWord)
-            if (m.find()) {
-                val sb = StringBuffer()
-                do {
-                    if (m.group(1) != null) {
-                        // 命中白名單片段（如「著名」）：原樣保留
-                        m.appendReplacement(sb, Matcher.quoteReplacement(m.group(1)))
-                    } else if (m.group(2) != null) {
-                        // 其餘「著」視為助詞 -> 「着」
-                        m.appendReplacement(sb, "着")
-                    }
-                } while (m.find())
-                m.appendTail(sb)
-                currentWord = sb.toString()
+            // FMM 掃描
+            for (k in maxCurrentScan downTo 2) {
+                val candidate = token.substring(i, i + k)
+
+                // A. 命中替換表
+                RAW_WORD_REPLACEMENTS[candidate]?.let { replacement ->
+                    // 命中規則：加 [ ]
+                    if (isDebug) out.append('[').append(replacement).append(']')
+                    else out.append(replacement)
+
+                    i += k
+                    matched = true
+                    return@let
+                }
+                if (matched) break
+
+                // B. 命中白名單
+                if (ZHU_ALLOW_LIST.contains(candidate)) {
+                    // 命中白名單：也加 [ ] (或可改用 < > 區分)
+                    if (isDebug) out.append('[').append(candidate).append(']')
+                    else out.append(candidate)
+
+                    i += k
+                    matched = true
+                    break
+                }
+            }
+
+            // C. 單字兜底處理
+            if (!matched) {
+                val c = token[i]
+                if (CHAR_REPLACEMENTS.containsKey(c)) {
+                    // 單字替換通常是異體字修正，Debug 時也可以標記一下，這裡選擇不標記以免太亂
+                    // 如果你想看單字替換，可以改成: if(isDebug) out.append('(').append(CHAR_REPLACEMENTS[c]).append(')')
+                    out.append(CHAR_REPLACEMENTS[c])
+                } else if (c == '著') {
+                    // 孤立的「著」轉「着」
+                    // 【建議修改】這是重要邏輯，Debug 時最好標出來
+                    if (isDebug) out.append("[着]") else out.append("着")
+                } else {
+                    out.append(c)
+                }
+                i++
             }
         }
-
-        // 3.2 單字異體清洗（1:1 替換）
-        val arr = currentWord.toCharArray()
-        var changed = false
-        for (i in arr.indices) {
-            CHAR_REPLACEMENTS[arr[i]]?.let {
-                arr[i] = it
-                changed = true
-            }
-        }
-
-        return if (changed) String(arr) else currentWord
     }
+
+    // 簡單判斷是否純標點（可根據需求擴展）
+    private fun isPunctuationOnly(s: String): Boolean {
+        return s.all { !Character.isLetterOrDigit(it) }
+    }
+
 }
