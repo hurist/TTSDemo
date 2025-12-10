@@ -199,7 +199,7 @@ object TraditionalTtsNormalizer {
         '長' to '长', '櫃' to '柜', '許' to '许', '續' to '续',
         '鬥' to '斗', '鬧' to '闹', '際' to '际', '舊' to '旧',
         '遊' to '游', '悶' to '闷', '彌' to '弥', '廳' to '厅',
-        '紅' to '红',
+        '紅' to '红', '鋪' to '铺',
 
     )
 
