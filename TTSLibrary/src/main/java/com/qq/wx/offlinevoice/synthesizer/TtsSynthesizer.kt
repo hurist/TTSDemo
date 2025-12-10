@@ -1473,8 +1473,8 @@ class TtsSynthesizer(
     private fun processTextForTts(input: String): String {
         var text = input.trim().processForTts()
         text = if (isTtsTextTraditional) {
-            val test = TraditionalTtsNormalizer.process(input, true)
-            AppLogger.d(TAG, "Traditional TTS Normalization: \n原文: $input\n规范后: $test")
+            //val test = TraditionalTtsNormalizer.process(input, true)
+            //AppLogger.d(TAG, "Traditional TTS Normalization: \n原文: $input\n规范后: $test")
             TraditionalTtsNormalizer.process(text)
         } else {
             //SimplifiedTtsNormalizer.process(text)
