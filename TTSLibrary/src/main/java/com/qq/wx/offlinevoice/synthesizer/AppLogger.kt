@@ -73,7 +73,8 @@ internal object AppLogger {
     @Volatile
     private var enabled = true
     @Volatile
-    private var consoleEnabled = true
+    internal var consoleEnabled = true
+        private set
     @Volatile
     private var fileEnabled = false
     @Volatile
