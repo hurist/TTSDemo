@@ -79,6 +79,60 @@
                 app:layout_constraintStart_toEndOf="@id/buttonStop"
                 app:layout_constraintTop_toTopOf="@id/buttonPlay" />
 
+
+        </androidx.appcompat.widget.LinearLayoutCompat>
+
+
+        <androidx.appcompat.widget.LinearLayoutCompat
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+
+            <Button
+                android:id="@+id/buttonFanTi"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="8dp"
+                android:layout_weight="1"
+                android:text="繁体测试"
+                android:visibility="gone"
+                app:layout_constraintEnd_toStartOf="@id/buttonPause"
+                app:layout_constraintStart_toStartOf="parent"
+                app:layout_constraintTop_toBottomOf="@id/spinnerVoice" />
+
+            <Button
+                android:id="@+id/buttonSegment"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="8dp"
+                android:layout_weight="1"
+                android:text="繁体分词"
+                app:layout_constraintEnd_toStartOf="@id/buttonStop"
+                app:layout_constraintStart_toEndOf="@id/buttonPlay"
+                app:layout_constraintTop_toTopOf="@id/buttonPlay" />
+
+            <Button
+                android:id="@+id/buttonJian"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="8dp"
+                android:layout_weight="1"
+                android:text="简体多音"
+                android:visibility="gone"
+                app:layout_constraintEnd_toStartOf="@id/buttonStop"
+                app:layout_constraintStart_toEndOf="@id/buttonPlay"
+                app:layout_constraintTop_toTopOf="@id/buttonPlay" />
+
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/transSwitch"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:text="是否为繁体"/>
+
+
         </androidx.appcompat.widget.LinearLayoutCompat>
 
 

@@ -414,7 +414,7 @@ class TtsSynthesizer(
                     //
                     // 因此：
                     // 内部事件仍保留，但对业务层不回调 onSentenceStart。
-                    if (!isUnderlyingPunctuationOnly) {
+                    //if (!isUnderlyingPunctuationOnly) { // 2025-12-12 暂时去掉此限制，会导致定位出问题
                         currentCallback?.onSentenceStart(
                             sentenceIndex = lineId,
                             sentence = lineTexts.getOrNull(lineId) ?: command.sentence,
@@ -424,7 +424,7 @@ class TtsSynthesizer(
                             endPos = lineEndPos.getOrNull(lineId) ?: command.endPos,
                             triggerReason = command.triggerReason
                         )
-                    }
+                    //}
                     AppLogger.d(TAG, "修改句子索引为 ${lineId}: ${lineTexts.getOrNull(lineId) ?: command.sentence}")
                     currentCallback?.onSentenceProgressChanged(
                         sentenceIndex = lineId,
