@@ -622,8 +622,8 @@ class TtsSynthesizer(
         currentSpeaker = speaker
 
         when (currentState) {
-            TtsPlaybackState.PLAYING -> {
-                AppLogger.i(TAG, "播放中切换 speaker，执行软重启以立即生效。")
+            TtsPlaybackState.PLAYING, TtsPlaybackState.BUFFERING -> {
+                AppLogger.i(TAG, "播放中、缓冲中切换 speaker，执行软重启以立即生效。")
                 softRestart()
             }
             TtsPlaybackState.PAUSED -> {
