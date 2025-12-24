@@ -77,6 +77,7 @@ object TraditionalTtsNormalizer {
         "相干" to "相干", "不相干" to "不相干", "乾涉" to "干涉", "乾擾" to "干扰",
         "乾爹" to "干爹", "乾媽" to "干妈", "乾兒子" to "干儿子",
         "乾女兒" to "干女儿", "乾妹" to "干妹", "乾親" to "干亲",
+        "乾尸" to "干尸",
 
         // 「沈」 -> 「沉」
         "沈默" to "沉默", "沈重" to "沉重", "沈澱" to "沉淀",
@@ -129,7 +130,7 @@ object TraditionalTtsNormalizer {
         "還錢" to "环钱", "歸還" to "归环", "償還" to "偿环",
         "還手" to "环手", "還原" to "还原", "生還" to "生环",
         "盛飯" to "成饭", "盛湯" to "成汤", "盛滿" to "成满",
-        "協調" to "协调", "強調" to "强调",
+        "協調" to "协调", "強調" to "强调", "調料" to "调料",
         "人參" to "人参",
         "佔卜" to "占卜", "櫃台" to "柜台",
 
@@ -178,7 +179,8 @@ object TraditionalTtsNormalizer {
         "復辟" to "复避", "執拗" to "执牛",
         "鑽石" to "攥石", "鑽頭" to "攥头", "沉澱" to "沉淀",
         "剛正不阿" to "刚正不阿", "組長" to "组长", "處長" to "处掌",
-        "乳臭未乾" to "乳臭未干"
+        "乳臭未乾" to "乳臭未干", "調和" to "条和", "長輩" to "掌辈",
+        "仔細" to "仔细", "鑰匙" to "钥匙", "沒收" to "莫收",
     )
 
     // 3) 單字級異體清洗（1:1）
@@ -199,15 +201,16 @@ object TraditionalTtsNormalizer {
         '長' to '长', '櫃' to '柜', '許' to '许', '續' to '续',
         '鬥' to '斗', '鬧' to '闹', '際' to '际', '舊' to '旧',
         '遊' to '游', '悶' to '闷', '彌' to '弥', '廳' to '厅',
-        '紅' to '红', '鋪' to '铺',
-
+        '紅' to '红', '鋪' to '铺', '澤' to '泽', '潤' to '润',
+        '牆' to '墙', '亞' to '亚', '麗' to '丽', "紳" to "绅",
+        '滾' to '滚', '濃' to '浓',
     )
 
     // 根據詞典自動計算最大掃描窗口
     private val MAX_SCAN_LENGTH: Int by lazy {
         val mapMax = RAW_WORD_REPLACEMENTS.keys.maxOfOrNull { it.length } ?: 1
         val allowMax = ZHU_ALLOW_LIST.maxOfOrNull { it.length } ?: 1
-        kotlin.math.max(mapMax, allowMax)
+        max(mapMax, allowMax)
     }
 
     // ————————————————————
