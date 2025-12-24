@@ -179,7 +179,7 @@ class TtsSynthesizer(
     private val commandChannel = Channel<Command>(Channel.UNLIMITED)
 
     // 暂停期待应用参数变更
-    private enum class PendingChange { SPEAKER, SPEED }
+    private enum class PendingChange { SPEAKER, SPEED, STRATEGY }
     private val pendingChanges = mutableSetOf<PendingChange>()
 
     // 新增：暂停期间的 seek 目标与防抖标记
@@ -382,7 +382,7 @@ class TtsSynthesizer(
                 is Command.Resume -> handleResume()
                 is Command.Stop -> handleStop()
                 is Command.Release -> { handleRelease(); break }
-                is Command.SetStrategy -> strategyManager.setStrategy(command.strategy)
+                is Command.SetStrategy -> handleSetStrategy(command.strategy)
                 is Command.SetCallback -> {
                     currentCallback = command.callback;
                     //currentCallback?.onInitialized(true)
@@ -600,9 +600,9 @@ class TtsSynthesizer(
         AppLogger.i(TAG, "setSpeed: 设定新速度=$newSpeed")
 
         when (currentState) {
-            TtsPlaybackState.PLAYING -> {
+            TtsPlaybackState.PLAYING,TtsPlaybackState.BUFFERING -> {
                 processorMutex.withLock { onlineAudioProcessor?.setSpeed(newSpeed) }
-                AppLogger.i(TAG, "播放中修改速度，执行软重启以立即生效。")
+                AppLogger.i(TAG, "播放中、缓冲中修改速度，执行软重启以立即生效。")
                 softRestart()
             }
             TtsPlaybackState.PAUSED -> {
@@ -611,6 +611,28 @@ class TtsSynthesizer(
                 if (first && !pendingSeekScheduled) scheduleParamRestartWhilePaused("setSpeed")
             }
             else -> AppLogger.i(TAG, "IDLE 状态修改速度，将在下一次 speak 生效。")
+        }
+    }
+
+    private suspend fun handleSetStrategy(strategy: TtsStrategy) {
+        if (strategyManager.currentStrategy == strategy) {
+            AppLogger.d(TAG, "setStrategy: 与当前策略相同，忽略。")
+            return
+        }
+        strategyManager.setStrategy(strategy)
+        AppLogger.i(TAG, "setStrategy: 设定新策略=$strategy")
+
+        when (currentState) {
+            TtsPlaybackState.PLAYING, TtsPlaybackState.BUFFERING  -> {
+                AppLogger.i(TAG, "播放中、缓冲中修改策略，执行软重启以立即生效。")
+                softRestart()
+            }
+            TtsPlaybackState.PAUSED -> {
+                AppLogger.i(TAG, "暂停中修改策略，恢复时从当前句开头用新策略播放。")
+                val first = pendingChanges.add(PendingChange.STRATEGY) // 复用 SPEED 标记
+                if (first && !pendingSeekScheduled) scheduleParamRestartWhilePaused("setStrategy")
+            }
+            else -> AppLogger.i(TAG, "IDLE 状态修改策略，将在下一次 speak 生效。")
         }
     }
 
