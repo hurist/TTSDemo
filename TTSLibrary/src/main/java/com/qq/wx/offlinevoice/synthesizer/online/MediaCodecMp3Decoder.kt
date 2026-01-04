@@ -65,7 +65,15 @@ class MediaCodecMp3Decoder(private val context: Context) : Mp3Decoder {
             extractor = MediaExtractor()
 
             // 数据源：API 23+ 用内存数据源；否则写入临时文件
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            // 线上好像一直有崩溃，先改回文件方式，还不知道是不是因为这个
+            // *** *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***
+            // pid: 0, tid: 19327 >>> com.wnyd.newyyds <<<
+            //
+            // backtrace:
+            //  #00  pc 0x0000000000034c88  /system/lib64/libmedia_jni.so (_JNIEnv::CallIntMethod(_jobject*, _jmethodID*, ...)+100)
+            //  #01  pc 0x0000000000034b10  /system/lib64/libmedia_jni.so (android::JMediaDataSource::readAt(long, unsigned long)+136)
+            //  #02  pc 0x000000000018e630  /system/lib64/libstagefright.so (android::CallbackDataSource::readAt(long, void*, unsigned long)+184)
+            /*if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                 mediaDataSource = object : MediaDataSource() {
                     override fun readAt(position: Long, buffer: ByteArray, offset: Int, size: Int): Int {
                         if (position >= mp3Data.size) return -1
@@ -79,14 +87,17 @@ class MediaCodecMp3Decoder(private val context: Context) : Mp3Decoder {
                 }
                 extractor.setDataSource(mediaDataSource)
                 AppLogger.d(TAG, "使用内存数据源(MediaDataSource)加载 MP3 数据。")
-            } else {
+            } else {*/
                 val random = UUID.randomUUID().toString()
                 val randomFilename = "temp_tts_${random}"
                 tempMp3File = File.createTempFile(randomFilename, ".mp3", context.cacheDir)
-                tempMp3File.writeBytes(mp3Data)
+                tempMp3File.outputStream().use { os ->
+                    os.write(mp3Data)
+                    os.flush()
+                }
                 extractor.setDataSource(tempMp3File.absolutePath)
                 AppLogger.d(TAG, "MP3数据已写入临时文件: ${tempMp3File.absolutePath}")
-            }
+            //}
 
             // 选择音轨
             var trackFormat: MediaFormat? = null
