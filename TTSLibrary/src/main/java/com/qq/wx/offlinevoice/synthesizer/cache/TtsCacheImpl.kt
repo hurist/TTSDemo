@@ -5,7 +5,9 @@ import android.widget.Toast
 import androidx.collection.LruCache
 import com.qq.wx.offlinevoice.synthesizer.AppLogger
 import com.qq.wx.offlinevoice.synthesizer.disklrucache.DiskLruCache
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.security.MessageDigest
@@ -37,12 +39,13 @@ class TtsCacheImpl(private val context: Context) : TtsCache {
 
     init {
         diskCache = openDiskCache()
+        cleanUpLegacyCache()
     }
 
     @Synchronized
     private fun openDiskCache(): DiskLruCache? {
         return try {
-            val cacheDir = getDiskCacheDir(context, "tts_cache")
+            val cacheDir = getDiskCacheDir(context, "tts_cache_v2")
             if (!cacheDir.exists()) {
                 cacheDir.mkdirs()
             }
@@ -51,6 +54,38 @@ class TtsCacheImpl(private val context: Context) : TtsCache {
             AppLogger.e("TtsCache", "打开 DiskLruCache 失败", e)
             null
         }
+    }
+
+    /**
+     * 【新增】清理遗留的旧缓存目录
+     */
+    private fun cleanUpLegacyCache() {
+        // 使用 GlobalScope 或者你自己的 Scope，只要保证在后台执行即可
+        // 这里为了演示简单，直接用 Thread 或者 CoroutineScope(Dispatchers.IO)
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                // 这里写死旧版本的目录名 "tts_cache"
+                val oldCacheDir = getLegacyCacheDir(context, "tts_cache")
+                if (oldCacheDir.exists()) {
+                    AppLogger.i("TtsCache", "发现旧版缓存，正在清理...")
+                    // 递归删除旧目录下的所有文件
+                    oldCacheDir.deleteRecursively()
+                    AppLogger.i("TtsCache", "旧版缓存清理完成")
+                }
+            } catch (e: Exception) {
+                AppLogger.e("TtsCache", "清理旧版缓存失败", e)
+            }
+        }
+    }
+
+    // 获取旧目录的辅助方法
+    private fun getLegacyCacheDir(context: Context, uniqueName: String): File {
+        val cachePath = if (context.externalCacheDir != null) {
+            context.externalCacheDir?.path
+        } else {
+            context.cacheDir.path
+        }
+        return File(cachePath + File.separator + uniqueName)
     }
 
     // -------------------- 对外 API --------------------
