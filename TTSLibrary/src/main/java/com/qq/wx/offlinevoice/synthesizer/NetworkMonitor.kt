@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.CopyOnWriteArraySet
 
 /**
  * NetworkMonitor（最终版，兼容 API 21+，已修复VPN和IMS问题）
@@ -30,7 +31,7 @@ class NetworkMonitor(context: Context) {
     private val connectivityManager =
         appContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
 
-    private val validNetworks = mutableSetOf<Network>()
+    private val validNetworks = CopyOnWriteArraySet<Network>()
     private val mutex = Mutex()
     private val scope = CoroutineScope(Dispatchers.Default)
 

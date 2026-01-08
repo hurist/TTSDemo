@@ -114,7 +114,7 @@ class PreloadManager private constructor(
     ) {
         val id = createCacheKey(content, speaker)
         if (jobs.containsKey(id)) {
-            AppLogger.d(TAG, "预加载任务已存在，跳过重复预加载。key=$id")
+            AppLogger.d(TAG, "预加载任务已存在，跳过重复预加载。key=$id, text=${content.take(20)}")
             onCompletion?.invoke(Result.success(Unit))
             return
         }
@@ -132,7 +132,7 @@ class PreloadManager private constructor(
             onCompletion = { result ->
                 // 当任务完全成功或被取消时，从 map 中移除
                 jobs.remove(id)
-                AppLogger.d(TAG, "预加载任务最终完成，已移除。key=$id, result=$result")
+                AppLogger.d(TAG, "预加载任务最终完成，已移除。key=$id, result=$result, content=${content.take(20)}")
                 onCompletion?.invoke(result)
             }
         )
