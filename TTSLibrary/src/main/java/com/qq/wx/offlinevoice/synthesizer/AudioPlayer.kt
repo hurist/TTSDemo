@@ -334,6 +334,9 @@ class AudioPlayer(
                                 if (audioTrack == null || item.sampleRate != currentSampleRate) {
                                     switchSampleRate(item.sampleRate)
                                 }
+                                if (audioTrack?.playState != AudioTrack.PLAYSTATE_PLAYING) {
+                                    audioTrack?.play()
+                                }
                                 if (currentPlaybackSource != item.source || audioTrack?.sampleRate != item.sampleRate) {
                                     currentPlaybackSource = item.source
                                     AppLogger.i(TAG, ">>> 开始播放 [${item.source}] (采样率: ${item.sampleRate} Hz, 句子: ${item.sentenceIndex}) <<<")
@@ -504,8 +507,9 @@ class AudioPlayer(
 
         when (control.type) {
             ResetType.HARD -> {
-                AppLogger.d(TAG, "执行硬重置：释放 AudioTrack，退出保护期并清空在线暂存。")
-                releaseAudioTrack()
+                AppLogger.d(TAG, "执行硬重置：清空缓冲区，重置状态，退出保护期并清空在线暂存。")
+                //releaseAudioTrack()
+                clearInternalBuffer()
                 currentPlaybackSource = null
                 protectionActive = false
                 protectedSentenceIndex = -1
@@ -674,18 +678,50 @@ class AudioPlayer(
         } catch (e: Exception) { AppLogger.e(TAG, "创建 AudioTrack 时出错", e); null }
     }
 
-    private suspend fun releaseAudioTrack() {
-        withContext(Dispatchers.IO) {
-            audioTrack?.let { track ->
-                AppLogger.d(TAG, "正在释放 AudioTrack (采样率: ${track.sampleRate} Hz)...")
-                try {
-                    if (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
-                        track.pause(); track.flush()
-                    }
-                    track.stop(); track.release()
-                } catch (e: Exception) { AppLogger.e(TAG, "释放 AudioTrack 时出现异常", e) }
+    private fun releaseAudioTrack() {
+        //withContext(Dispatchers.IO) {
+        val track = audioTrack
+        audioTrack = null // 先置空
+        track?.let { track ->
+            AppLogger.d(TAG, "正在释放 AudioTrack (采样率: ${track.sampleRate} Hz)...")
+            try {
+                if (track.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                    track.pause(); track.flush()
+                }
+                track.stop(); track.release()
+            } catch (e: Exception) { AppLogger.e(TAG, "释放 AudioTrack 时出现异常", e) }
+        }
+        audioTrack = null
+        //}
+    }
+
+    /**
+     * 核心修改：只清空数据，不销毁对象。
+     * 用于切书、跳段、重置等场景。
+     */
+    private fun clearInternalBuffer() {
+        val at = audioTrack ?: return
+        try {
+            if (at.state == AudioTrack.STATE_INITIALIZED) {
+                // 1. 先暂停，防止继续发出声音
+                // 注意：如果已经是 STOPPED 状态，flush 可能无效，所以通常先 pause
+                if (at.playState == AudioTrack.PLAYSTATE_PLAYING) {
+                    at.pause()
+                }
+
+                // 2. 核心：清空缓冲区已写入但未播放的数据
+                at.flush()
+
+                // 3. 恢复播放状态（可选，取决于你是否马上要写入新数据）
+                // 如果你后面逻辑是 write 之前会调 play()，这里可以不调
+                // at.play()
+
+                AppLogger.d(TAG, "AudioTrack 缓冲区已 Flush 清空，对象复用。")
             }
-            audioTrack = null
+        } catch (e: Exception) {
+            AppLogger.e(TAG, "Flush AudioTrack 失败", e)
+            // 如果 flush 失败，说明 Track 可能坏了，此时才需要重建
+            releaseAudioTrack()
         }
     }
 
