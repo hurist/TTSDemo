@@ -20,7 +20,7 @@ import java.util.concurrent.CopyOnWriteArraySet
  *
  * 💡 新增逻辑: 明确排除 VPN 和仅用于 VoLTE 的 IMS 网络。
  */
-class NetworkMonitor(context: Context) {
+internal class NetworkMonitor(context: Context) {
 
     private val TAG = "NetworkMonitor"
 

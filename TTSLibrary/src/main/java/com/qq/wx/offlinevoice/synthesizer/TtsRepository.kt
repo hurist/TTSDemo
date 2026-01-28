@@ -14,7 +14,7 @@ import kotlinx.coroutines.withContext
 import java.io.IOException
 import java.security.MessageDigest
 
-class TtsRepository(
+internal class TtsRepository(
     val onlineApi: OnlineTtsApi,
     private val mp3Decoder: Mp3Decoder,
     private val cache: TtsCache,
