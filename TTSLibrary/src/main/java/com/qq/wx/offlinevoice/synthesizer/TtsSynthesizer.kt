@@ -63,6 +63,7 @@ import java.util.concurrent.CopyOnWriteArrayList
 class TtsSynthesizer(
     private val context: Context,
     speaker: Speaker,
+    private val splitterStrategy: SentenceSplitterStrategy = SentenceSplitterStrategy.NEWLINE,
     private var currentCallback: TtsCallback? = null
 ) {
 
@@ -121,16 +122,17 @@ class TtsSynthesizer(
     private var currentState: TtsPlaybackState = TtsPlaybackState.IDLE
 
     // 使用 TtsBag 取代原先的 String 句子单元
+    // 物理段指按分割策略分割出来的一段文本，按段落分割代表一个完整的段落，按句子分割代表一个完整的句子
     data class TtsBag(
         val text: String,
-        val index: Int,
+        val index: Int,             // 序号
         val utteranceId: String,
-        val start: Int,
-        val end: Int,
-        val originalGroupId: Int,   // 物理段所属的“原始行”ID
-        val partInGroup: Int,       // 行内分段序号
-        val groupStart: Int,        // 行整体开始位置
-        val groupEnd: Int           // 行整体结束位置
+        val start: Int,             // 当前bag在整个文本中的开始位置
+        val end: Int,               // 当前bag在整个文本中的结束位置
+        val originalGroupId: Int,   // 物理段的ID，按段落分割时，这代表当前bag属于哪一段，当按句子分割时，这代表当前bag在哪一句
+        val partInGroup: Int,       // 所属物理段的分段序号
+        val groupStart: Int,        // 在所属物理段的开始位置
+        val groupEnd: Int           // 在所属物理段的结束位置
     ) {
         override fun toString(): String {
             return "index=$index, 第$originalGroupId 段 第$partInGroup 句, text='${text.trim()}'"
@@ -166,7 +168,6 @@ class TtsSynthesizer(
     private var isPausedByError = false
     private var onlineAudioProcessor: AudioSpeedProcessor? = null
     private val processorMutex = Mutex()
-    private val splitterStrategy = SentenceSplitterStrategy.NEWLINE
 
     // 在线失败退避
     private var onlineFailureCount: Int = 0
