@@ -24,6 +24,14 @@ enum class Speaker(
             return entries.firstOrNull { it.modelName == name }
         }
 
+        /**
+         * 通过模型名称获取枚举实例,匹配在线与离线两种模型名称，有个问题是女生的离线模型名称相同，
+         * 所以只能返回第一个匹配到的实例，即 FEMALE1
+         */
+        fun fromAnyModelName(name: String?): Speaker? {
+            return entries.firstOrNull { it.modelName == name || it.offlineModelName == name }
+        }
+
         /** 是否为微信离线 TTS 支持的模型名称（含在线与离线两种命名） */
         fun isWxModel(name: String?): Boolean {
             return entries.any { it.modelName == name || it.offlineModelName == name }
