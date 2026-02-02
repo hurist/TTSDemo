@@ -19,8 +19,24 @@ enum class Speaker(
     }
 
     companion object {
+        /** 通过模型名称获取枚举实例,仅匹配在线模型名称 */
         fun fromModelName(name: String?): Speaker? {
             return entries.firstOrNull { it.modelName == name }
+        }
+
+        /** 是否为微信离线 TTS 支持的模型名称（含在线与离线两种命名） */
+        fun isWxModel(name: String?): Boolean {
+            return entries.any { it.modelName == name || it.offlineModelName == name }
+        }
+
+        /** 是否为微信离线 TTS 支持的离线模型名称 */
+        fun isOfflineModel(name: String?): Boolean {
+            return entries.any { it.offlineModelName == name }
+        }
+
+        /** 是否为微信离线 TTS 支持的在线模型名称 */
+        fun isOnlineModel(name: String?): Boolean {
+            return entries.any { it.modelName == name }
         }
     }
 }
