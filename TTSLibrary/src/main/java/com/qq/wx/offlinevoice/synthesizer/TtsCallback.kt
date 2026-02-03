@@ -76,7 +76,7 @@ interface TtsCallback {
     fun onResumed() {}
     
     /**
-     * 合成过程中发生错误时调用
+     * 合成过程中发生其他错误时调用
      * @param errorMessage 错误描述
      */
     fun onError(errorMessage: String) {}
