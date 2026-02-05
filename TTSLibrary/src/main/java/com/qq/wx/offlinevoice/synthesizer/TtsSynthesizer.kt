@@ -1363,7 +1363,8 @@ class TtsSynthesizer(
                         mode = SynthesisMode.OFFLINE,
                         errorCode = ErrCode.MODEL_NOT_FOUND,
                         errorMessage = "离线模型资源不存在",
-                        sentence = trimmed
+                        sentence = trimmed,
+                        isCurrentSentence = index == playingSentenceIndex
                     )
                     AppLogger.e(
                         TAG,
@@ -1417,7 +1418,8 @@ class TtsSynthesizer(
                         mode = SynthesisMode.OFFLINE,
                         errorCode = prepare,
                         errorMessage = errorMsg,
-                        sentence = trimmed
+                        sentence = trimmed,
+                        isCurrentSentence = index == playingSentenceIndex
                     )
                     if (prepare == -1) {
                         return@withLock SynthesisResult.Success
@@ -1458,7 +1460,8 @@ class TtsSynthesizer(
                             mode = SynthesisMode.OFFLINE,
                             errorMessage = "离线synthesize失败",
                             errorCode = status,
-                            sentence = trimmed
+                            sentence = trimmed,
+                            isCurrentSentence = index == playingSentenceIndex
                         )
                         val reason = """
                             ┌ ----------------------------
@@ -1525,7 +1528,8 @@ class TtsSynthesizer(
                     mode = SynthesisMode.OFFLINE,
                     errorMessage = e.message,
                     errorCode = -1,
-                    sentence = trimmed
+                    sentence = trimmed,
+                    isCurrentSentence = index == playingSentenceIndex
                 )
                 SynthesisResult.Failure(reason)
             } finally {

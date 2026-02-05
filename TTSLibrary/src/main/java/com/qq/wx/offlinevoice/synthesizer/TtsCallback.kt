@@ -93,5 +93,5 @@ interface TtsCallback {
      * @param errorCode 错误码
      * @param errorMessage 错误描述
      */
-    fun onSynthesisError(sentence: String?, mode: SynthesisMode, errorCode: Int? = -1, errorMessage: String?) {}
+    fun onSynthesisError(sentence: String?, mode: SynthesisMode, errorCode: Int? = -1, errorMessage: String?, isCurrentSentence: Boolean = false) {}
 }
