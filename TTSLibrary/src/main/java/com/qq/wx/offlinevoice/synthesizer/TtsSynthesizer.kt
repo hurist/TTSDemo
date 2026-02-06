@@ -69,7 +69,7 @@ class TtsSynthesizer(
 
     private sealed class SynthesisResult {
         object Success : SynthesisResult()
-        data class Failure(val reason: String) : SynthesisResult()
+        data class Failure(val reason: String, val code: Int = -1) : SynthesisResult()
         object Deferred : SynthesisResult() // 暂不产出（如保护期/会话切换）
         data class Skip(val reason: String) : SynthesisResult()
     }
@@ -470,7 +470,7 @@ class TtsSynthesizer(
                 is Command.InternalError -> {
                     AppLogger.e(TAG, "收到内部错误，将执行 handleStop: ${command.message}")
                     handleStop()
-                    currentCallback?.onError(command.message)
+                    currentCallback?.onError(command.message, ErrCode.UNKNOW_ERR)
                 }
                 is Command.SeekTo -> handleSeekTo(command.index)
             }
@@ -524,7 +524,7 @@ class TtsSynthesizer(
         }
         if (result.isEmpty()) {
             AppLogger.w(TAG, "提供的文本中未找到有效句子。", important = true)
-            currentCallback?.onError("文本中没有有效的句子")
+            currentCallback?.onError("文本中没有有效的句子", ErrCode.EMPTY_TEXT)
             return
         }
         sentences.addAll(result)
@@ -1018,7 +1018,7 @@ class TtsSynthesizer(
     }
 
     private fun CoroutineScope.launchSynthesisLoop() = launch {
-        var synthesisFailed = false
+        var synthesisFailedResult: SynthesisResult.Failure? = null
         try {
             while (coroutineContext.isActive && synthesisSentenceIndex < sentences.size && isSessionActive()) {
                 val index = synthesisSentenceIndex
@@ -1089,7 +1089,7 @@ class TtsSynthesizer(
                     }
                     is SynthesisResult.Failure -> {
                         AppLogger.e(TAG, "句子 $index 合成最终失败 (策略: $sessionStrategy): ${finalResult.reason}")
-                        synthesisFailed = true
+                        synthesisFailedResult = finalResult
                         break
                     }
                     else -> { /* no-op */}
@@ -1124,11 +1124,13 @@ class TtsSynthesizer(
                 }
 
                 if (isSessionActive() && coroutineContext.isActive) {
-                    AppLogger.i(TAG, "合成循环结束(活动会话)。发送EOS。失败标志: $synthesisFailed")
+                    AppLogger.i(TAG, "合成循环结束(活动会话)。发送EOS。失败标志: $synthesisFailedResult")
                     enqueueEndOfStreamGuarded {
-                        if (synthesisFailed) {
+                        if (synthesisFailedResult != null) {
                             isPausedByError = true
                             sendCommand(Command.Pause)
+                            //  TODO: 这里需要回调一下错误，
+                            currentCallback?.onError(synthesisFailedResult.reason, synthesisFailedResult.code)
                         } else {
                             AppLogger.i(TAG, "所有句子正常合成完毕，等待播放结束...")
                         }
@@ -1211,7 +1213,7 @@ class TtsSynthesizer(
                     └ ----------------------------
                 """.trimIndent()
                 AppLogger.w(TAG, reason, important = true)
-                return SynthesisResult.Failure(reason)
+                return SynthesisResult.Failure(reason, ErrCode.EMPTY_TEXT)
             }
 
             val duration = System.currentTimeMillis() - start
@@ -1284,7 +1286,7 @@ class TtsSynthesizer(
             if (code == 1111 || code == 1110) {
                 return SynthesisResult.Skip("在线合成请求被拒绝（跳过）: $reason")
             }
-            return SynthesisResult.Failure(reason)
+            return SynthesisResult.Failure(reason, ErrCode.WX_ERR + code)
         } catch (e: Exception) {
             val reason = """
                 ┌ ----------------------------
@@ -1304,7 +1306,7 @@ class TtsSynthesizer(
             }
             clearBufferingOnProgress(index)
             AppLogger.e(TAG, reason, important = true)
-            return SynthesisResult.Failure(reason)
+            return SynthesisResult.Failure(reason, ErrCode.ONLINE_OTHER_ERR)
         }
     }
 
@@ -1319,6 +1321,18 @@ class TtsSynthesizer(
             AppLogger.i(TAG, "离线合成请求被延后：当前处于保护期，受保护句=${audioPlayer.getProtectedSentenceIndex()}，请求句=$index, groupIndex:${bag.partInGroup}")
             return SynthesisResult.Deferred
         }
+
+        AppLogger.d(
+            TAG,
+            """
+                合成离线句子请求：
+                index: $index,
+                synthesisSentenceIndex: $synthesisSentenceIndex,
+                playingSentenceIndex: $playingSentenceIndex,
+                bag: $bag,
+                callReason: ${callReason ?: "无"}
+            """.trimIndent()
+        )
 
         val sentence = bag.text
         val trimmed = processTextForTts(sentence)
@@ -1364,14 +1378,13 @@ class TtsSynthesizer(
                         errorCode = ErrCode.MODEL_NOT_FOUND,
                         errorMessage = "离线模型资源不存在",
                         sentence = trimmed,
-                        isCurrentSentence = index == playingSentenceIndex
                     )
                     AppLogger.e(
                         TAG,
                         "离线语音资源不存在: ${currentSpeaker.offlineModelName}，请先下载对应资源。",
                         important = true
                     )
-                    return SynthesisResult.Failure(reason)
+                    return SynthesisResult.Failure(reason, ErrCode.MODEL_NOT_FOUND)
                 }
 
                 AppLogger.d(
@@ -1419,13 +1432,12 @@ class TtsSynthesizer(
                         errorCode = prepare,
                         errorMessage = errorMsg,
                         sentence = trimmed,
-                        isCurrentSentence = index == playingSentenceIndex
                     )
                     if (prepare == -1) {
                         return@withLock SynthesisResult.Success
                     } else {
                         // 如果是资源错误或者其他未知错误，算失败处理，不再继续流程
-                        return@withLock SynthesisResult.Failure(reason)
+                        return@withLock SynthesisResult.Failure(reason, prepare)
                     }
                 }
 
@@ -1461,7 +1473,6 @@ class TtsSynthesizer(
                             errorMessage = "离线synthesize失败",
                             errorCode = status,
                             sentence = trimmed,
-                            isCurrentSentence = index == playingSentenceIndex
                         )
                         val reason = """
                             ┌ ----------------------------
@@ -1513,7 +1524,8 @@ class TtsSynthesizer(
                 }
                 SynthesisResult.Success
             } catch (e: CancellationException) {
-                SynthesisResult.Failure("合成[离线](句子 $bag, ${sentence.trim()})协程被取消")
+                SynthesisResult.Failure("合成[离线](句子 $bag, ${sentence.trim()})协程被取消",
+                    ErrCode.OFFLINE_CANCELLED)
             } catch (e: Exception) {
                 val reason = """
                     ┌ ----------------------------
@@ -1529,9 +1541,8 @@ class TtsSynthesizer(
                     errorMessage = e.message,
                     errorCode = -1,
                     sentence = trimmed,
-                    isCurrentSentence = index == playingSentenceIndex
                 )
-                SynthesisResult.Failure(reason)
+                SynthesisResult.Failure(reason, ErrCode.OFFLINE_OTHER_ERR)
             } finally {
                 nativeEngine?.reset()
             }

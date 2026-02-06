@@ -79,7 +79,7 @@ interface TtsCallback {
      * 合成过程中发生其他错误时调用
      * @param errorMessage 错误描述
      */
-    fun onError(errorMessage: String) {}
+    fun onError(errorMessage: String, errorCode: Int?) {}
 
     /**
      * 日志回调
@@ -93,5 +93,5 @@ interface TtsCallback {
      * @param errorCode 错误码
      * @param errorMessage 错误描述
      */
-    fun onSynthesisError(sentence: String?, mode: SynthesisMode, errorCode: Int? = -1, errorMessage: String?, isCurrentSentence: Boolean = false) {}
+    fun onSynthesisError(sentence: String?, mode: SynthesisMode, errorCode: Int? = -1, errorMessage: String?) {}
 }

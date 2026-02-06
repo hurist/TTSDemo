@@ -29,12 +29,14 @@ object SentenceSplitter {
     private enum class RegexConfig(val regex: String) {
         /** 换行分割 */
         LineBreak("[\r\n]+"),
+        //LineBreak("[\\r\\n]+|　　"), // "　　"是为了针对有声小说中常见的段落缩进符号，如果没有这种情况请用上面的
 
         /** 句末标点（句号、问号、感叹号、省略号等） */
         BreakPunctuation("([.](?![0-9])|[。?？!！…]+)[\"”'’)）]*\\\\s*"),
 
         /** 停顿标点（逗号、分号、冒号等） */
-        EndPunctuation("[,，;；]+|[:：][\"“'‘]+\\\\s*"),
+        //EndPunctuation("[,，;；]+|[:：][\"“'‘]+\\\\s*"),
+        EndPunctuation("[;；]+|[:：][\"“'‘]+\\\\s*"),
 
         /** 分隔标点（顿号等） */
         SeparationPunctuation("[、]+");

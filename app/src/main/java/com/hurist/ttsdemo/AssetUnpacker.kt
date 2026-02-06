@@ -19,7 +19,7 @@ object AssetUnpacker {
 
     private const val TAG = "AssetUnpacker"
     private const val ZIP_FILE_NAME = "tts.zip"
-    private const val MANIFEST_FILE_NAME = "manifest.json"
+    private const val MANIFEST_FILE_NAME = "sha256.json"
     private var TARGET_DIR_NAME = "" // 文件将被解压到的目标目录名
     private const val BUFFER_SIZE = 8192 // 用于 I/O 操作的 8KB 缓冲区
 
